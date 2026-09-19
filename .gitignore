@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.orig
+*.bak
+*.egg-info/
+.venv/
+venv/
+
+# 本機工作指示，不發布
+CLAUDE.md
