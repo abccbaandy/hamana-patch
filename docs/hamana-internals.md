@@ -79,6 +79,32 @@
 7-zip 4.x 的 format / codec plugin；`DefaultSPIs/7z.dll` 則是 2024-11-30 版，
 ax7z.spi optional 使用的是後者（同目錄優先）。
 
+## 閃退定位（debugger 工法）
+
+本機無 WinDbg / cdb；用 `tools/re/`（需 capstone、pefile，裝在專案 `.venv`）：
+
+```bash
+# 建環境（uv cache 不可落在 AppData）
+UV_CACHE_DIR=<非 AppData 的 cache 目錄> uv venv --python <系統 python> .venv
+UV_CACHE_DIR=<非 AppData 的 cache 目錄> uv pip install --python .venv capstone pefile
+```
+
+| 工具 | 用途 |
+|---|---|
+| `tools/re/minidbg.py` | ctypes 小 debugger（64-bit Python 可除 32-bit），`--bp VA` 命中時列暫存器與堆疊中的 return address（模組+偏移）。預設 bp `0x5bfbf4` |
+| `tools/re/disasm.py <exe> <VA> [back] [n]` | 反組譯 VA 附近 |
+| `tools/re/run_sandbox.ps1` / `run_matrix.ps1` | 不掛 debugger 的崩潰 / 標題判定；matrix 可多 exe 對照，輸出不含檔名 |
+| `tools/re/exif_check.py` / `make_exif_fuzz.py` | EXIF 結構檢查 / 產生損壞樣本 |
+
+流程：事件記錄 Id=1000 看例外碼與位移 → 若是 `0xC000000D @ 0x1bfc24`，
+`minidbg.py` 下預設 bp 開素材 → 堆疊第一個 Hamana 位址（`[esp+0x18]`）即越界的呼叫點 →
+`disasm.py` 看該函式 prologue 是否為 `push -1; push thunk` 型 EH frame → 可套 L0b 手法。
+
+事實（CONFIRMED）：
+- 無 ASLR（DllCharacteristics 不含 DYNAMIC_BASE），ImageBase `0x400000`，`.text` file offset = VA − `0x400000`
+- 靜態連結 VS2005 CRT：`_invalid_parameter` `0x5bfbf4`、`_invalid_parameter_noinfo` `0x5bfc18`，全檔 2784 個呼叫點
+- 大量 LTCG 自訂呼叫慣例（以 edi / esi 傳參），看呼叫端要注意
+
 ## 沙箱測試工法
 
 不要直接用使用者本尊的 Hamana 測試 —— `OpenLastImageAuto=1` 會自動開啟上次的圖
@@ -97,10 +123,14 @@ HistoryCount=0
 History2Count=0
 ```
 
+注意：**開單一檔案 = 進入其所在資料夾並背景預讀鄰居**。要測「這一張」是否致命，
+每個樣本放獨立資料夾（BUG-3 實測：壞樣本與正常樣本同資料夾時，連正常那張也崩）。
+`ThumbDBDir` 留空時 Hamana 會在 exe 旁建 `HamanaThumb/`。
+
 ### 崩潰判定
 
 `Start-Process -PassThru` 後輪詢 `$p.HasExited`，並偵測 `WerFault` 行程出現。
-腳本範例留在 session scratchpad `hs/test_crash.ps1`（非專案檔，需要時重寫即可）。
+腳本：`tools/re/run_sandbox.ps1`（單檔逐秒記錄）、`tools/re/run_matrix.ps1`（多 exe 對照）。
 
 ### 讀圖成敗判定（不需觀看圖片內容）
 

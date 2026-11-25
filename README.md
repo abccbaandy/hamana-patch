@@ -1,8 +1,8 @@
 # Hamana Patch
 
-修正 [Hamana](https://www.vector.co.jp/soft/win95/art/se311115.html) v1.48（2006/06/19）兩個會造成**閃退**與**讀圖失敗**的缺陷。
+修正 [Hamana](https://www.vector.co.jp/soft/win95/art/se311115.html) v1.48（2006/06/19）三個會造成**閃退**與**讀圖失敗**的缺陷。
 
-補丁只改寫 binary 內的字串常數，**不修改任何程式碼**，檔案大小不變，可完整還原。
+補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 一項改動 94 bytes 程式碼。
 
 > **本專案不包含 Hamana 本體**，請自備。這裡提供的是 patcher 與研究文件。
 
@@ -12,9 +12,10 @@
 Bug-fix patches for Hamana v1.48 (2006), a Direct3D-based image viewer for Windows.
 
 - **Crash on opening archives**: Hamana's built-in zip handler (minizip 0.15 / zlib 1.1.4) crashes on zero-byte entries. The patch disables the built-in handler so archives are routed to `ax7z.spi` + a modern `7z.dll` instead. Encrypted zip support comes along for free.
+- **Crash on JPEGs with corrupt EXIF**: Hamana's EXIF parser uses VS2005 checked iterators; an out-of-range IFD offset calls `_invalid_parameter_noinfo` and the process dies with `0xC000000D` — even when the bad JPEG is merely a neighbour being prefetched. The patch hooks the CRT `_invalid_parameter` and, when the innermost SEH frame belongs to one of the three EXIF parser functions, unwinds to that function's normal exit so only the EXIF is skipped. Other code paths behave exactly as before.
 - **Images failing to load**: Hamana dispatches decoders by *file extension*, never by content. WebP files named `.jpg` are handed to libjpeg and fail. The patch makes `ifwebp.spi` also claim `*.jpg`, relying on Hamana's automatic fallback when a Susie plugin reports the format as unsupported.
 
-Both patches only rewrite string constants — no code is modified, file size is unchanged, and `--revert` restores the originals. **Hamana itself is not distributed here.**
+The zip and WebP patches only rewrite string constants; the EXIF patch changes 94 bytes of code (a 9-byte hook plus an 85-byte stub placed in existing `int3` padding). File sizes are unchanged and `--revert` restores the originals. **Hamana itself is not distributed here.**
 
 </details>
 
@@ -30,7 +31,16 @@ Hamana 對 `.zip` / `.cbz` 走的是自己內建的解壓常式（**minizip 0.15
 
 影響範圍比想像中大——**光是「瀏覽」含問題壓縮檔的資料夾就會崩潰**（`0xC000000D`），不必真的開啟它。
 
-### 2. 部分圖檔讀取失敗（顯示 error）
+### 2. 含損壞 EXIF 的 JPEG 造成閃退
+
+開啟後畫面停住幾秒就閃退（`0xC000000D`）。原因是 JPEG 的 EXIF 內位移指向區段之外
+（常見於轉檔工具沒更新 EXIF 指標），Hamana 的 EXIF 解析器越界存取時，
+VS2005 的 checked iterator 直接終止行程。
+
+**同資料夾或同壓縮檔裡只要有一張這種 JPEG，背景預讀就會讓 Hamana 崩潰**，即使你正在看的是別張。
+這也是上一版（只修 zip）套用後仍會閃退的原因。
+
+### 3. 部分圖檔讀取失敗（顯示 error）
 
 **Hamana 依副檔名分派解碼器，完全不看檔案內容。** 副檔名為 `.jpg` 的檔案一律送進內建 libjpeg，內容若是 WebP 就會失敗：
 
@@ -68,16 +78,18 @@ python apply_patches.py "C:\path\to\Hamana" --revert
 | 對象 | 變更 | 效果 |
 |---|---|---|
 | `Hamana.exe` | UTF-16 字串 `"zip"` → `"zzq"`、`"cbz"` → `"czq"` | 停用內建解壓，交給 `ax7z.spi` + `7z.dll` |
+| `Hamana.exe` | hook CRT `_invalid_parameter`（9 bytes）+ stub（85 bytes，放在既有 `int3` 填充區） | EXIF 越界時只放棄該段 EXIF，圖照常顯示 |
 | `DefaultSPIs/ifwebp.spi` | 宣告 `*.webp` → `*.webp;*.jpg;*.jpeg` | 接手副檔名錯置的 WebP |
 | `Hamana.ini` | `Respect_libjpeg=0` | 上一項的生效前提 |
 | `ax7z.spi.ini` | `user_extensions` 追加 `cbz;cbr` | `.cbz` 的配套（7z.dll 清單沒有它） |
 
 ### 為什麼有效
 
-Hamana 有兩個可介入的接縫：
+Hamana 有三個可介入的接縫：
 
 1. **找不到內建 handler 時，會把檔案交給 Susie SPI。** 內建壓縮格式是用字串常數 `"zip"` / `"cbz"` 認定的，改掉它們就等於停用內建解壓。
 2. **SPI 的 `IsSupported` 回報不支援時，Hamana 會自動回退**到下一個解碼器。因此 SPI 可以安全地「多宣告」副檔名——真 JPEG 會被 `ifwebp.spi` 拒絕，然後回退給 libjpeg，不受影響。
+3. **EXIF 解析器的三個函式都有標準 C++ EH frame。** 越界時 CRT 會先呼叫 `_invalid_parameter`；在這裡依最內層 SEH 框架判斷「是不是 EXIF 解析中」，是的話就把堆疊還原到該函式的正常出口。非 EXIF 路徑完全照舊。
 
 詳細原理、重現方式與實測資料見 [`docs/`](docs/)。
 
@@ -91,6 +103,8 @@ Hamana 有兩個可介入的接縫：
 | cbz 含 0-byte entry | 崩潰 | 正常 |
 | 瀏覽含問題壓縮檔的資料夾 | 崩潰 `0xC000000D` | 正常 |
 | **加密 zip** | **開不了** | **可開啟（ax7z 密碼對話框）** |
+| JPEG 的 EXIF 位移越界（11 種致命變形） | 崩潰 `0xC000000D` | 正常，圖照常顯示 |
+| 資料夾 / 壓縮檔內混有上述 JPEG | 預讀到就崩潰 | 正常 |
 | WebP 內容 + `.jpg` 副檔名 | 讀取失敗 | 正常（VP8 與 VP8X 皆可） |
 | 真 JPEG / 真 WebP / rar / 7z / 資料夾 / 單張圖 | 正常 | 正常（無退化） |
 
@@ -117,7 +131,7 @@ python tools/hamana_fix.py diagnose "<壓縮檔或資料夾>"
 python tools/hamana_fix.py fix "<壓縮檔>" -o "<輸出目錄>"
 ```
 
-可偵測 0-byte entry 與副檔名／內容不符，並輸出修正後的檔案。
+可偵測 0-byte entry、副檔名／內容不符、EXIF 位移越界，並輸出修正後的檔案（壞 EXIF 會被移除，像素不動）。
 
 ---
 
@@ -125,9 +139,9 @@ python tools/hamana_fix.py fix "<壓縮檔>" -o "<輸出目錄>"
 
 | 文件 | 內容 |
 |---|---|
-| [`docs/bugs.md`](docs/bugs.md) | 兩個 bug 的根因與完整重現矩陣 |
+| [`docs/bugs.md`](docs/bugs.md) | 各 bug 的根因與完整重現矩陣 |
 | [`docs/solutions.md`](docs/solutions.md) | 修復方案分層（L0–L5），含未採用方案的理由 |
-| [`docs/hamana-internals.md`](docs/hamana-internals.md) | 二進位事實、三層分派規則、沙箱測試工法 |
+| [`docs/hamana-internals.md`](docs/hamana-internals.md) | 二進位事實、三層分派規則、閃退定位（debugger）與沙箱測試工法 |
 
 ---
 

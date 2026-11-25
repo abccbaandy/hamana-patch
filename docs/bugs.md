@@ -2,9 +2,14 @@
 
 - 修復方案分層（含通用解）：`docs/solutions.md` ← **先看這個**
 - 架構與測試工法：`docs/hamana-internals.md`
-- 工具：`tools/hamana_fix.py`（素材 diagnose / fix）、`tools/patch_ifwebp.py`（SPI 分派 patch）
+- 工具：`tools/hamana_fix.py`（素材 diagnose / fix）、`tools/patch_ifwebp.py`（SPI 分派 patch）、
+  `tools/patch_hamana_exif.py`（EXIF 越界防護）、`tools/re/`（除錯 / 反組譯 / 迴歸測試，見 internals）
 
-本檔只記錄兩個 bug 的根因與重現證據；「該怎麼修」以 `solutions.md` 為準。
+本檔只記錄各 bug 的根因與重現證據；「該怎麼修」以 `solutions.md` 為準。
+
+**閃退先查事件記錄**：`Get-WinEvent` Application Id=1000。例外碼 `0xC000000D` +
+錯誤位移 `0x001bfc24` 是 CRT `_invalid_parameter_noinfo` 的固定位置 —— 任何
+checked iterator 越界都長這樣，**不代表是同一個 bug**，要用 `tools/re/minidbg.py` 抓呼叫者。
 
 ---
 
@@ -116,6 +121,46 @@ python tools/hamana_fix.py fix "<資料夾>"                    # 資料夾：�
 
 兩者前提皆為 `DefaultSPIs/ifwebp.spi` 存在（2024 版支援 VP8 與 VP8X；
 2011 的 `ifwebp.spi_` 基於 libwebp 0.1.3，**不支援 VP8X**，勿回退）。
+
+---
+
+## BUG-3 `EXIF_OOB` — JPEG 的 EXIF 位移損壞 → 閃退
+
+狀態：**CONFIRMED**（沙箱實機重現、debugger 定位呼叫者、修復驗證）
+
+| 項目 | 內容 |
+|---|---|
+| 觸發條件 | JPEG APP1 EXIF 內 IFD / 值的位移 ≥ EXIF 區段長度 |
+| 症狀 | 開啟後畫面停住數秒 → 閃退，exit / WER 例外碼 `0xC000000D`，錯誤位移 `0x1bfc24` |
+| **影響面** | **同資料夾 / 壓縮檔內只要有一張，背景預讀就會崩潰**，即使正在看的是別張（含 WebP） |
+| 與 zip 無關 | L0 已讓 zip 走 ax7z，仍崩潰；資料夾、單張開啟同樣崩潰 |
+| 實際案例 | 10 張 JPEG 的 ExifIFD(0x8769) 指標約 34MB，EXIF 區段僅約 20KB（轉檔工具未改寫指標） |
+
+根因（CONFIRMED，debugger 堆疊 + 反組譯）：
+- JPEG 載入（`0x452720`）把 APP1 收進全域 `std::vector<BYTE>`（`0x68eabc`），呼叫 EXIF 解析器
+- 解析器 3 個函式，以 VS2005 checked iterator（`_SECURE_SCL`）存取 vector：
+  `0x454d90` IFD0 → `0x453600` Exif/Interop 子 IFD、`0x4546c0` GPS
+- 位移越界 → `_invalid_parameter_noinfo`（`0x5bfc18`）→ `_invoke_watson` → `TerminateProcess(0xC000000D)`。
+  不經 SEH，無法被 try/catch 攔截
+- 實例：`0x453600` 內 `cmp esi, size; jb ok; call 0x5bfc18`（`0x453650`），esi = ExifIFD 位移
+
+重現矩陣（`tools/re/make_exif_fuzz.py` 以 marble.jpg 產生；每檔獨立資料夾開啟）：
+
+| 損壞類型 | patch 前 | patch 後 |
+|---|---|---|
+| ExifIFD 越界（LE / BE / 差 1 byte）、ExifIFD entry 數過大 | CRASH | ALIVE，圖正常 |
+| IFD0 位移越界、IFD0 entry 數過大、TIFF header 截斷 | CRASH | ALIVE |
+| GPS IFD 越界、GPS 值位移越界 | CRASH | ALIVE |
+| IFD0 / ExifIFD 值位移越界（Make、ExposureTime） | CRASH | ALIVE |
+| Interop 越界、值長度過大、IFD1 越界、縮圖位移/長度越界、ExifIFD 指回 IFD0、byte order 錯 | ALIVE | ALIVE |
+| 結構正確（對照） | ALIVE | ALIVE |
+| 實際素材（251 張，10 張壞 EXIF） | CRASH ~4–6s | ALIVE；10 張壞 JPEG 單獨打包也能正常解碼 |
+| 同素材移除那 10 段 EXIF | ALIVE | ALIVE |
+
+### 修復
+
+**首選**：`python tools/patch_hamana_exif.py "<Hamana>\Hamana.exe"`（已併入 `apply_patches.py`）。
+原理見 `solutions.md` L0b。素材端替代：`hamana_fix.py fix` 會移除壞 EXIF 區段（`EXIF_OOB`）。
 
 ---
 

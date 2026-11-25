@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Hamana 修正補丁 —— 一鍵套用 / 還原。
 
-對指定的 Hamana 安裝目錄套用兩個二進位補丁與一項設定變更：
+對指定的 Hamana 安裝目錄套用三個二進位補丁與一項設定變更：
 
   1. Hamana.exe          停用內建 zip/cbz 解壓，改由 ax7z.spi + 7z.dll 接手
-  2. DefaultSPIs/ifwebp.spi  讓它同時宣告 *.jpg / *.jpeg，修正副檔名錯置的 WebP
-  3. Hamana.ini          Respect_libjpeg=0（第 2 項的生效前提）
-  4. ax7z.spi.ini        user_extensions 追加 cbz;cbr（第 1 項的配套）
+  2. Hamana.exe          EXIF 越界防護：壞 EXIF 的 JPEG 不再閃退（0xC000000D）
+  3. DefaultSPIs/ifwebp.spi  讓它同時宣告 *.jpg / *.jpeg，修正副檔名錯置的 WebP
+  4. Hamana.ini          Respect_libjpeg=0（第 3 項的生效前提）
+  5. ax7z.spi.ini        user_extensions 追加 cbz;cbr（第 1 項的配套）
 
-兩個補丁都只改字串常數、不動任何程式碼，檔案大小不變，且可完整還原。
+1、3 只改字串常數；2 改 85 bytes 程式碼（hook + .text 填充區內的 stub）。
+檔案大小皆不變，且可完整還原。
 原理與實測資料見 docs/solutions.md。
 
 用法：
@@ -27,6 +29,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools'))
 
 import patch_hamana_zip as zip_patch          # noqa: E402
+import patch_hamana_exif as exif_patch        # noqa: E402
 import patch_ifwebp as webp_patch             # noqa: E402
 
 
@@ -70,16 +73,19 @@ def resolve(hamana_dir):
 
 def do_check(hamana_dir):
     exe, spi = resolve(hamana_dir)
-    print('[1/3] Hamana.exe')
+    print('[1/4] Hamana.exe（zip/cbz）')
     zip_patch.do_check(exe)
     print()
-    print('[2/3] DefaultSPIs/ifwebp.spi')
+    print('[2/4] Hamana.exe（EXIF）')
+    exif_patch.do_check(exe)
+    print()
+    print('[3/4] DefaultSPIs/ifwebp.spi')
     if spi:
         webp_patch.do_check(spi)
     else:
         print('  未安裝，略過（WebP 支援需要它）')
     print()
-    print('[3/3] Hamana.ini')
+    print('[4/4] Hamana.ini')
     ini = find_ini(hamana_dir)
     if not ini:
         print('  尚未產生（Hamana 至少執行過一次才會建立）')
@@ -93,17 +99,20 @@ def do_check(hamana_dir):
 
 def do_apply(hamana_dir, ax7z_ini):
     exe, spi = resolve(hamana_dir)
-    print('[1/4] 停用內建 zip/cbz 解壓')
+    print('[1/5] 停用內建 zip/cbz 解壓')
     zip_patch.do_patch(exe, ax7z_ini)
     print()
-    print('[2/4] 修正 WebP 副檔名分派')
+    print('[2/5] EXIF 越界防護')
+    exif_patch.do_patch(exe)
+    print()
+    print('[3/5] 修正 WebP 副檔名分派')
     if spi:
         webp_patch.do_patch(spi)
     else:
         print('  找不到 DefaultSPIs/ifwebp.spi，略過。')
         print('  （需要 WebP 支援的話，請先安裝 ifwebp.spi）')
     print()
-    print('[3/4] Hamana.ini 設定')
+    print('[4/5] Hamana.ini 設定')
     ini = find_ini(hamana_dir)
     if not ini:
         print('  Hamana.ini 尚未產生。請先執行一次 Hamana 再跑本工具，')
@@ -111,7 +120,7 @@ def do_apply(hamana_dir, ax7z_ini):
     else:
         set_respect_libjpeg(ini, 0)
     print()
-    print('[4/4] 完成')
+    print('[5/5] 完成')
     print('  備份：Hamana.exe.orig / ifwebp.spi.orig / ax7z.spi.ini.orig')
     print('  還原：python apply_patches.py "<目錄>" --revert')
 
@@ -119,6 +128,10 @@ def do_apply(hamana_dir, ax7z_ini):
 def do_revert(hamana_dir):
     exe, spi = resolve(hamana_dir)
     print('[1/3] Hamana.exe')
+    try:
+        exif_patch.do_revert(exe)
+    except SystemExit as e:
+        print('  %s' % e)
     try:
         zip_patch.do_revert(exe)
     except SystemExit as e:

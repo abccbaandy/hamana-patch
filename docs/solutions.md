@@ -9,6 +9,7 @@
 |---|---|---|
 | 壓縮檔解壓 | **可**，改掉 exe 內的 `zip`/`cbz` 字串即可整條交給 ax7z.spi | 實測（L0） |
 | 影像解碼分派 | **可**，透過 Susie SPI 宣告副檔名 + `Respect_*=0` | 實測（L2） |
+| checked iterator 越界終止 | **可**，hook CRT `_invalid_parameter`，依 SEH 框架展開到函式出口 | 實測（L0b） |
 
 兩個關鍵機制：
 
@@ -73,6 +74,37 @@ python tools/patch_hamana_zip.py "<Hamana>\Hamana.exe" --revert
 - 解壓效能未量測；7z.dll 較新但多一層 SPI 呼叫
 - **未驗證**：檔案清單 UI 內 `.zip` 的顯示與進入。自動化測不到，
   但 patched / unpatched 瀏覽資料夾的行為一致，風險應該很低 —— 請實際操作確認
+
+---
+
+## L0b — EXIF 越界防護（hook `_invalid_parameter`）
+
+**涵蓋：BUG-3 及 EXIF 解析器內所有 checked iterator 越界。** 工具：`tools/patch_hamana_exif.py`
+
+狀態：**CONFIRMED**（19 種損壞樣本 + 實際素材，見 `bugs.md` BUG-3）
+
+這是本專案第一個**改程式碼**的 patch（94 bytes，大小不變，`--revert` 逐 byte 還原）：
+
+1. `0x5bfbf4`（CRT `_invalid_parameter` 入口）前 9 bytes → `jmp 0x53d0b0` + nop
+2. `0x53d0b0`（`.text` 內 `0xCC` 填充區 `0x53d095..0x53e000`）放 85-byte stub：
+   - `reg = fs:[0]`（最內層 SEH 註冊記錄），`reg->handler` 若是 EXIF 函式的 EH thunk
+     → `esp = reg - regoff; jmp exit`（該函式自己的正常出口：還原 fs:[0]、pop、ret）
+   - 否則執行被覆蓋的原指令再跳回 `0x5bfbfd`，**非 EXIF 路徑行為與原版完全相同**
+
+| 函式 | EH thunk | regoff | exit |
+|---|---|---|---|
+| `0x453600` 子 IFD | `0x60d3f4` | `0xd8` | `0x4543ea` |
+| `0x454d90` IFD0 | `0x60d4d5` | `0xac` | `0x455592` |
+| `0x4546c0` GPS | `0x60d45f` | `0xb8` | `0x454d71` |
+
+成立條件（皆已確認）：三函式都以 `push -1; push thunk; mov eax,fs:[0]` 建 C++ EH frame，
+`lea eax,[esp+regoff]; mov fs:[0],eax` 固定 → `baseline_esp = fs:[0] - regoff`；
+thunk 各只被一個函式引用；出口不做 GS cookie 檢查；回傳值呼叫端不用。
+代價：跳過的區域物件解構子不執行 → 每次觸發洩漏數十 bytes。
+
+**可擴充**：日後別的函式也因 checked iterator 閃退，只要該函式有同型 EH frame，
+在 `EXIF_FUNCS` 加一列（thunk、regoff、exit）即可；stub 上限 0x80 bytes，再多要換更大的 cave。
+定位流程見 `hamana-internals.md`「閃退定位」。
 
 ---
 
@@ -147,7 +179,8 @@ python tools/patch_ifwebp.py "<Hamana>\DefaultSPIs\ifwebp.spi" --revert
 
 ## L3 — 資料面正規化（`tools/hamana_fix.py`）
 
-**涵蓋：已知模式**（0-byte entry、副檔名不符）。治標，但零風險、不動 Hamana。
+**涵蓋：已知模式**（0-byte entry、副檔名不符、EXIF 越界）。治標，但零風險、不動 Hamana。
+EXIF 檢查比 Hamana 實際崩潰條件略寬（IFD1 / Interop 越界原版不崩也會報），修復＝移除該 EXIF 區段。
 
 適合：不想改 Hamana 安裝、或素材要分享給別人時。
 `diagnose` 也可當成「開啟前健檢」使用。
@@ -179,8 +212,8 @@ L2 的實測已證明**機制成立**（宣告可接管、不支援會回退）�
 
 | 情境 | 作法 |
 |---|---|
-| 一勞永逸 | **L0 + L2**：各 patch 一次，之後素材完全不用預處理 |
-| 不想改 exe | **L1a**（改副檔名）+ **L2** |
+| 一勞永逸 | **L0 + L0b + L2**（`apply_patches.py`），之後素材完全不用預處理 |
+| 不想改 exe | **L1a**（改副檔名）+ **L2** + **L3**（壞 EXIF） |
 | 完全不想動 Hamana 安裝 | **L3**（資料面修復） |
 | 遇到新的未知問題 | 先 `hamana_fix.py diagnose`；不是已知模式就走 `docs/hamana-internals.md` 的沙箱工法二分定位 |
 
