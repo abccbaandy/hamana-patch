@@ -24,6 +24,7 @@ import argparse
 import io
 import os
 import re
+import struct
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools'))
@@ -71,6 +72,23 @@ def resolve(hamana_dir):
     return exe, (spi if os.path.isfile(spi) else None)
 
 
+def check_7z_dll(hamana_dir):
+    """zip 補丁的前提：DefaultSPIs/7z.dll 存在且為 32-bit。回傳問題描述，正常則 None。"""
+    p = os.path.join(hamana_dir, 'DefaultSPIs', '7z.dll')
+    if not os.path.isfile(p):
+        return '找不到 DefaultSPIs\\7z.dll'
+    with open(p, 'rb') as fh:
+        d = fh.read(0x400)
+    try:
+        e = struct.unpack_from('<I', d, 0x3c)[0]
+        machine = struct.unpack_from('<H', d, e + 4)[0]
+    except struct.error:
+        return 'DefaultSPIs\\7z.dll 不是有效的 DLL'
+    if machine != 0x14c:
+        return 'DefaultSPIs\\7z.dll 不是 32-bit（machine 0x%x），Hamana 載入不了' % machine
+    return None
+
+
 def do_check(hamana_dir):
     exe, spi = resolve(hamana_dir)
     print('[1/4] Hamana.exe（zip/cbz）')
@@ -100,7 +118,12 @@ def do_check(hamana_dir):
 def do_apply(hamana_dir, ax7z_ini):
     exe, spi = resolve(hamana_dir)
     print('[1/5] 停用內建 zip/cbz 解壓')
-    zip_patch.do_patch(exe, ax7z_ini)
+    problem = check_7z_dll(hamana_dir)
+    if problem:
+        print('  %s，略過（否則 zip 會完全開不了）。' % problem)
+        print('  請先依 README「安裝第三方元件」放入 32-bit 7z.dll 與新版 ax7z.spi 再重跑。')
+    else:
+        zip_patch.do_patch(exe, ax7z_ini)
     print()
     print('[2/5] EXIF 越界防護')
     exif_patch.do_patch(exe)

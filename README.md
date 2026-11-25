@@ -54,7 +54,28 @@ Not a JPEG file: starts with 0x52 0x49
 
 ## 快速開始
 
-需求：Python 3.8+、Windows、Hamana v1.48。
+需求：Python 3.8+、Windows、Hamana v1.48，以及下面三個第三方元件。
+
+### 1. 安裝第三方元件（Hamana 原版沒有）
+
+zip 與 WebP 的修正要靠這三個元件接手。Hamana 原版的 `DefaultSPIs` 只有 2006 年的舊版 `ax7z.spi`，
+沒有 `7z.dll` 也沒有 `ifwebp.spi`，請先補齊。**Hamana 是 32-bit 程式，三者都必須用 32-bit 版。**
+
+| 元件 | 下載 | 放到 |
+|---|---|---|
+| `7z.dll` | 7-Zip 24.09 32-bit 安裝檔 [`7z2409.exe`](https://www.7-zip.org/a/7z2409.exe) | `DefaultSPIs\7z.dll` |
+| `ax7z.spi` | [`ax7z-0.7-457y3b6.zip`](https://yakex.dev/junks/dist/ax7z-0.7-457y3b6.zip)（v0.7 y3b6） | `DefaultSPIs\ax7z.spi`（取代原本的舊版） |
+| `ifwebp.spi` | [uyjulian/ifwebp Releases](https://github.com/uyjulian/ifwebp/releases) 的 **Win32 (Intel 32-bit GCC)**，即 `ifwebp.intel32.gcc.7z`（v2.0.6） | `DefaultSPIs\ifwebp.spi` |
+
+- **7z.dll**：執行 `7z2409.exe` 安裝後，從安裝目錄（64-bit Windows 上是 `C:\Program Files (x86)\7-Zip`）
+  複製 `7z.dll`。**不要用 `7z2409-x64.exe` 或 64-bit 7-Zip 的 `7z.dll`**，32-bit 的 Hamana 載入不了。
+- **ax7z.spi**：解開 zip 取出 `ax7z.spi`。建議先把原本的 `DefaultSPIs\ax7z.spi` 改名備份（例如 `ax7z.spi_old`）再放入。
+  ax7z 會優先使用同資料夾的 `7z.dll`。
+- **ifwebp.spi**：`.7z` 檔可用剛裝好的 7-Zip 解開。不要選 `intel64` 或 `arm` 版。
+
+`apply_patches.py` 會檢查 `DefaultSPIs\7z.dll` 是否存在且為 32-bit，不符合時會略過 zip 補丁。
+
+### 2. 套用補丁
 
 ```bash
 git clone https://github.com/abccbaandy/hamana-patch.git

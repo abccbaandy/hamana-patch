@@ -44,6 +44,10 @@ python tools/patch_hamana_zip.py "<Hamana>\Hamana.exe" --check
 python tools/patch_hamana_zip.py "<Hamana>\Hamana.exe" --revert
 ```
 
+**前置元件**（Hamana 原版沒有）：32-bit `7z.dll`（7-Zip 24.09 `7z2409.exe`）、ax7z.spi v0.7 y3b6、
+ifwebp v2.0.6 `ifwebp.intel32.gcc.7z`；下載與放置見 README「安裝第三方元件」。
+`apply_patches.py` 在 `DefaultSPIs/7z.dll` 缺少或非 32-bit 時略過本 patch。
+
 **必要配套**：`cbz` / `cbr` 不在 7z.dll 的內建副檔名清單中，
 需加進 ax7z 的 `user_extensions`（工具會自動處理
 `%APPDATA%\ax7z\ax7z.spi.ini`）。`zip` 本身在 7z.dll 清單內，不必加。
