@@ -174,6 +174,15 @@ python tools/hamana_fix.py fix "<壓縮檔>" -o "<輸出目錄>"
 
 可偵測 0-byte entry、副檔名／內容不符、EXIF 位移越界，並輸出修正後的檔案（壞 EXIF 會被移除，像素不動）。
 
+[`tools/context_menu.ps1`](tools/context_menu.ps1) 在檔案總管右鍵選單加入「使用 Hamana 開啟」（圖片與 zip/rar/7z 等壓縮檔）。只寫目前使用者的登錄檔，不需系統管理員權限，也不改預設開啟程式：
+
+```powershell
+.\tools\context_menu.ps1 -HamanaPath "<Hamana>\Hamana.exe"   # 安裝
+.\tools\context_menu.ps1 -Uninstall                          # 移除
+```
+
+Hamana 搬家後重新執行安裝指令即可更新路徑；Windows 11 的選單需點「顯示其他選項」。
+
 ---
 
 ## 文件
