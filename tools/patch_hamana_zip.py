@@ -103,6 +103,8 @@ def do_patch(path, ax7z_ini):
     cbz_off, zip_off, state = locate(bytes(d))
     if state == 'patched':
         print('已經是 patch 過的版本，不需重複執行')
+        # ax7z.spi.ini 可能被刪除重建過，仍確認一次 cbz/cbr 設定
+        patch_ax7z_ini(ax7z_ini or default_ax7z_ini())
         return
     if state is None:
         raise SystemExit('找不到預期的字串簽章；此 Hamana 版本不受支援')

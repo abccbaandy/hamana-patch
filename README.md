@@ -143,6 +143,26 @@ Hamana 有三個可介入的接縫：
 
 ---
 
+## 疑難排解
+
+### 遇到奇怪的問題：先重建 Hamana.ini
+
+設定錯亂、啟動或顯示異常、補丁後行為不如預期時，可以讓 Hamana 重建設定檔試試：
+
+1. **先關閉 Hamana**（它結束時會寫回 ini，開著改沒用）
+2. 把 Hamana 目錄下的 `Hamana.ini` **改名**（例如 `Hamana.ini.bak`），不要直接刪，沒改善還能改回來
+3. 啟動 Hamana，再**正常關閉**一次 —— 新的 `Hamana.ini` 是在關閉時才寫出來的
+4. 重跑 `python apply_patches.py "C:\path\to\Hamana"`
+   新 ini 沒有 `Respect_libjpeg=0`，WebP 修正需要它；已套用的 exe / spi 補丁會自動略過
+
+代價：視窗位置、開啟歷史與自訂設定（縮圖快取位置、同時顯示張數、MipMap 等）都會回到預設值。
+
+ax7z 的設定檔在 `%APPDATA%\ax7z\ax7z.spi.ini`，也可用同樣方式改名重建；之後一樣重跑 `apply_patches.py`
+補回 `cbz;cbr`（否則 `.cbz` / `.cbr` 開不了）。若 ax7z 還沒重新產生設定檔，工具會提示改在
+ax7z 設定對話框的 User-defined 手動加入 `cbz;cbr`。
+
+---
+
 ## 附帶工具
 
 [`tools/hamana_fix.py`](tools/hamana_fix.py) 用於素材端的診斷與修復，適合不想修改 Hamana 安裝的情況：
