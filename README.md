@@ -2,7 +2,9 @@
 
 修正 [Hamana](https://www.vector.co.jp/soft/win95/art/se311115.html) v1.48（2006/06/19）三個會造成**閃退**與**讀圖失敗**的缺陷。
 
-補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 一項改動 94 bytes 程式碼。
+另外替 Hamana 開啟 DEP（資料執行防止），降低惡意圖檔利用舊解析器漏洞的風險。
+
+補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 一項改動 94 bytes 程式碼；DEP 一項改 PE header 1 個 bit。
 
 > **本專案不包含 Hamana 本體**，請自備。這裡提供的是 patcher 與研究文件。
 
@@ -14,6 +16,7 @@ Bug-fix patches for Hamana v1.48 (2006), a Direct3D-based image viewer for Windo
 - **Crash on opening archives**: Hamana's built-in zip handler (minizip 0.15 / zlib 1.1.4) crashes on zero-byte entries. The patch disables the built-in handler so archives are routed to `ax7z.spi` + a modern `7z.dll` instead. Encrypted zip support comes along for free.
 - **Crash on JPEGs with corrupt EXIF**: Hamana's EXIF parser uses VS2005 checked iterators; an out-of-range IFD offset calls `_invalid_parameter_noinfo` and the process dies with `0xC000000D` — even when the bad JPEG is merely a neighbour being prefetched. The patch hooks the CRT `_invalid_parameter` and, when the innermost SEH frame belongs to one of the three EXIF parser functions, unwinds to that function's normal exit so only the EXIF is skipped. Other code paths behave exactly as before.
 - **Images failing to load**: Hamana dispatches decoders by *file extension*, never by content. WebP files named `.jpg` are handed to libjpeg and fail. The patch makes `ifwebp.spi` also claim `*.jpg`, relying on Hamana's automatic fallback when a Susie plugin reports the format as unsupported.
+- **Hardening — DEP**: `Hamana.exe` lacks the `NX_COMPAT` flag, and Windows client editions default to the OptIn DEP policy, so Hamana runs without DEP. Its built-in parsers (libjpeg 1998, zlib 1.1.4, a hand-written EXIF parser) are statically linked and the exe has no ASLR. The patch sets `NX_COMPAT` (one bit). See `docs/attack-surface.md`.
 
 The zip and WebP patches only rewrite string constants; the EXIF patch changes 94 bytes of code (a 9-byte hook plus an 85-byte stub placed in existing `int3` padding). File sizes are unchanged and `--revert` restores the originals. **Hamana itself is not distributed here.**
 
@@ -100,6 +103,7 @@ python apply_patches.py "C:\path\to\Hamana" --revert
 |---|---|---|
 | `Hamana.exe` | UTF-16 字串 `"zip"` → `"zzq"`、`"cbz"` → `"czq"` | 停用內建解壓，交給 `ax7z.spi` + `7z.dll` |
 | `Hamana.exe` | hook CRT `_invalid_parameter`（9 bytes）+ stub（85 bytes，放在既有 `int3` 填充區） | EXIF 越界時只放棄該段 EXIF，圖照常顯示 |
+| `Hamana.exe` | PE header `DllCharacteristics` 加上 `NX_COMPAT`（1 bit） | 行程啟用 DEP（原版在 Windows 預設 OptIn 政策下沒有 DEP） |
 | `DefaultSPIs/ifwebp.spi` | 宣告 `*.webp` → `*.webp;*.jpg;*.jpeg` | 接手副檔名錯置的 WebP |
 | `Hamana.ini` | `Respect_libjpeg=0` | 上一項的生效前提 |
 | `ax7z.spi.ini` | `user_extensions` 追加 `cbz;cbr` | `.cbz` 的配套（7z.dll 清單沒有它） |
@@ -128,6 +132,8 @@ Hamana 有三個可介入的接縫：
 | 資料夾 / 壓縮檔內混有上述 JPEG | 預讀到就崩潰 | 正常 |
 | WebP 內容 + `.jpg` 副檔名 | 讀取失敗 | 正常（VP8 與 VP8X 皆可） |
 | 真 JPEG / 真 WebP / rar / 7z / 資料夾 / 單張圖 | 正常 | 正常（無退化） |
+| DEP（`GetProcessMitigationPolicy`） | 關閉 | 開啟（permanent） |
+| 開啟 DEP 後：jpg / png / 透明 png / gif / bmp / webp / zip / cbz / 資料夾預讀 | 正常 | 正常（無退化） |
 
 加密 zip 那列是意外收穫：`ax7z.txt` §8 把「Hamana 開不了加密 zip」列為 *Susie plugin 端無法對應*的限制，原因正是內建優先。補丁連帶解除了它。
 

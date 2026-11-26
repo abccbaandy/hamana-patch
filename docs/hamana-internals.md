@@ -1,6 +1,6 @@
 # Hamana 內部構造與測試工法
 
-供後續 session 快速進入狀況。bug 本身見 `docs/bugs.md`。
+供後續 session 快速進入狀況。bug 本身見 `docs/bugs.md`；安全緩解與攻擊面見 `docs/attack-surface.md`。
 
 ## 二進位事實（CONFIRMED）
 
