@@ -93,7 +93,9 @@ UV_CACHE_DIR=<非 AppData 的 cache 目錄> uv pip install --python .venv capsto
 |---|---|
 | `tools/re/minidbg.py` | ctypes 小 debugger（64-bit Python 可除 32-bit），`--bp VA` 命中時列暫存器與堆疊中的 return address（模組+偏移）。預設 bp `0x5bfbf4` |
 | `tools/re/disasm.py <exe> <VA> [back] [n]` | 反組譯 VA 附近 |
-| `tools/re/run_sandbox.ps1` / `run_matrix.ps1` | 不掛 debugger 的崩潰 / 標題判定；matrix 可多 exe 對照，輸出不含檔名 |
+| `tools/re/hidden_run.py` | **首選**：背景逐檔矩陣（最小化 + 不啟動，不搶焦點），多 exe 對照，輸出不含檔名；作法與不可行方案見 docstring |
+| `tools/re/run_sandbox.ps1` / `run_matrix.ps1` | 舊版（Start-Process，**會搶前景焦點**）；run_sandbox 仍可用於逐秒記錄記憶體 |
+| `tools/re/pe_audit.py` | PE 安全旗標（ASLR/DEP/SafeSEH/GS）與內嵌函式庫指紋 |
 | `tools/re/exif_check.py` / `make_exif_fuzz.py` | EXIF 結構檢查 / 產生損壞樣本 |
 
 流程：事件記錄 Id=1000 看例外碼與位移 → 若是 `0xC000000D @ 0x1bfc24`，
@@ -121,7 +123,10 @@ IsFullscreen=0         # 避免全螢幕干擾
 ThumbDBDir=<沙箱內路徑>  # 不要污染正式的縮圖快取
 HistoryCount=0
 History2Count=0
+[Window] 的 Left=-5000 Right=-3700 Top=-3000 Bottom=-2100  # 畫面外，配合 hidden_run.py
 ```
+
+`[Recent File List]` 整段不要複製（含使用者路徑）。
 
 注意：**開單一檔案 = 進入其所在資料夾並背景預讀鄰居**。要測「這一張」是否致命，
 每個樣本放獨立資料夾（BUG-3 實測：壞樣本與正常樣本同資料夾時，連正常那張也崩）。
@@ -129,8 +134,9 @@ History2Count=0
 
 ### 崩潰判定
 
-`Start-Process -PassThru` 後輪詢 `$p.HasExited`，並偵測 `WerFault` 行程出現。
-腳本：`tools/re/run_sandbox.ps1`（單檔逐秒記錄）、`tools/re/run_matrix.ps1`（多 exe 對照）。
+輪詢行程結束碼；`hidden_run.py` 以 `CreateProcess` + `SW_SHOWMINNOACTIVE` 啟動並用 `EnumWindows` 讀標題。
+舊腳本（`run_sandbox.ps1` / `run_matrix.ps1`）用 `Start-Process -PassThru` + 偵測 `WerFault`，會搶焦點。
+送按鍵翻頁（`SendKeys`、`PostMessage` VK_SPACE 到主視窗）實測無效，標題不變；未查原因。
 
 ### 讀圖成敗判定（不需觀看圖片內容）
 
