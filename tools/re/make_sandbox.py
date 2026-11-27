@@ -28,6 +28,21 @@ SAFE = {
 }
 
 
+def reset_window(exe_dir):
+    """Hamana 若在最小化狀態正常結束（例如開不存在的檔），會把 [Window] 寫成 -32000 →
+    之後每次啟動 D3D 建 device 失敗並跳對話框。每次啟動前呼叫，改回畫面外座標。回傳是否有修正。"""
+    p = os.path.join(exe_dir, 'Hamana.ini')
+    if not os.path.isfile(p):
+        return False
+    text = io.open(p, encoding='latin-1').read()
+    if not re.search(r'(?m)^(Left|Top)=-32000\s*$', text):
+        return False
+    for k in ('Left', 'Right', 'Top', 'Bottom'):
+        text = re.sub(r'(?m)^%s=.*$' % k, '%s=%s' % (k, SAFE[k]), text)
+    io.open(p, 'w', encoding='latin-1', newline='').write(text)
+    return True
+
+
 def build_ini(src, sets):
     text = io.open(src, encoding='latin-1').read()
     text = re.sub(r'(?ms)^\[Recent File List\].*?(?=^\[|\Z)', '', text)

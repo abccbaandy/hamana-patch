@@ -12,6 +12,9 @@
 """
 import ctypes as C, ctypes.wintypes as W, sys, time, struct, os
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from make_sandbox import reset_window  # noqa: E402
+
 k32 = C.WinDLL('kernel32', use_last_error=True)
 DEBUG_ONLY_THIS_PROCESS = 2
 DBG_CONTINUE = 0x00010002
@@ -115,6 +118,8 @@ def main():
     if not bps:
         bps = [0x5bfbf4]
     cmd = ' '.join('"%s"' % a for a in argv)
+    if reset_window(os.path.dirname(os.path.abspath(argv[0]))):
+        print('[修正] 沙箱 ini 的視窗座標被寫成最小化（-32000），已改回', flush=True)
     si = STARTUPINFO(); si.cb = C.sizeof(si); pi = PROCESS_INFORMATION()
     si.dwFlags, si.wShowWindow = 1, 4  # STARTF_USESHOWWINDOW + SW_SHOWNOACTIVATE：不搶焦點。不可用最小化（7）：除錯下 D3D 以 client 高 0 建 device 失敗並跳對話框
     if not k32.CreateProcessW(None, C.create_unicode_buffer(cmd), None, None, False,

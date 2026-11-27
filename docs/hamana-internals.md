@@ -33,6 +33,7 @@ ini 載入（`0x4080e2` 起）→ 全域旗標：`Respect_libjpeg`→`[0x67bfc8]
 5. `!Respect_libjpeg && isJpeg` → 內建 libjpeg
 6. 第 3 步沒試過且 `gdipExt` → `ifgdip.spi`
 - 成功後 `isJpeg` 時呼叫 `0x456fc0`（guess：EXIF 讀取）。
+- `gdipExt` 的 map `0x68ec04` = ifgdip 物件（`0x68eb90`，載入時以匯出 `IsIfGDIP` 辨識，`0x464252`）宣告的副檔名集合；內建 libjpeg 以虛擬 SPI 項目註冊（`0x46453f`）。
 - 推論：**jpg/jpeg 永遠不會交給 GDI+**（BMP 改名 `.jpg` 在所有設定都讀不出；改名 `.png` 則讀得出）；**exe 內沒有可達的 PNG 解碼器**，`Respect_internalPNGDec` 實際只決定 PNG 是否先問 GDI+。
 - PNG 相關字串兩組皆在靜態連結的 D3DX 區（libpng `1.0.5` 與 PNG writer），無 code xref、無 libpng 錯誤字串 → 孤兒資料（guess）；開 PNG 時 zlib inflate（`0x4d6110`/`0x4d6760`）在任何設定都不命中（CONFIRMED，正控制組 = 原版開 zip 會命中）。
 
@@ -42,7 +43,7 @@ ini 載入（`0x4080e2` 起）→ 全域旗標：`Respect_libjpeg`→`[0x67bfc8]
 |---|---|---|
 | `ifwebp.spi`（2024） | `*.webp` | uyjulian 版，支援 VP8 / VP8X |
 | `ifwebp.spi_`（2011） | `*.webp` | libwebp 0.1.3，**不支援 VP8X**，勿使用 |
-| `ifgdip.spi` | `*.bmp` `*.jpg;*.jpeg` `*.png` `*.gif` `*.tif;*.tiff` `*.ico` `*.wmf` `*.emf` | GDI+ |
+| `ifgdip.spi`（v0.8） | `*.bmp` `*.png` `*.gif` `*.tif;*.tiff` `*.ico` `*.wmf` `*.emf`；`*.jpg;*.jpeg` 只在 jpg 旗標=1 時 | GDI+。DllMain 讀 ini `[ifgdip]`（`dpi` `bmp` `png` `gif` `tif` `jpg` `ico` `wmf` `emf`，jpg 預設 0）。**ini 路徑 bug**：`GetModuleFileNameA` 後沒截掉檔名就接 `ifgdip.ini` → 實際讀 `DefaultSPIs\ifgdip.spiifgdip.ini`（CONFIRMED，`spi_probe.py` + 讀內部字串 `0x1001a0e0`）。`GetPicture` 不看副檔名，依內容解碼（CMYK JPEG 可） |
 | `ax7z.spi` | 7z.dll 支援的壓縮格式 | **zip 不走它**，見下 |
 
 ## 壓縮檔處理
@@ -106,7 +107,8 @@ UV_CACHE_DIR=<非 AppData 的 cache 目錄> uv pip install --python .venv capsto
 |---|---|
 | `tools/re/minidbg.py` | ctypes 小 debugger（64-bit Python 可除 32-bit），`--bp VA` 命中時列暫存器與堆疊中的 return address（模組+偏移）。預設 bp `0x5bfbf4`。`--loads` 逐筆記錄 DLL 載入（含用完即釋放的），`--cwd` 指定工作目錄；**必須在 PowerShell 執行**（Git Bash 會弄壞參數 → `CreateProcess failed 2`） |
 | `tools/re/disasm.py <exe> <VA> [back] [n]` | 反組譯 VA 附近 |
-| `tools/re/make_sandbox.py <安裝目錄> <沙箱> [--exe Hamana.exe.orig] [--set K=V] [--drop-spi X]` | 建沙箱（自動套下方 ini 覆寫、去掉 Recent File List） |
+| `tools/re/make_sandbox.py <安裝目錄> <沙箱> [--exe Hamana.exe.orig] [--set K=V] [--drop-spi X]` | 建沙箱（自動套下方 ini 覆寫、去掉 Recent File List）；`reset_window()` 被 hidden_run / minidbg 每次啟動前呼叫 |
+| `tools/re/spi_probe.py <plugin.spi> [檔案...]` | **需 32-bit Python**：`UV_PYTHON_INSTALL_DIR` 設到非 AppData 的工具目錄後 `uv python install cpython-3.12-windows-x86`。列 `GetPluginInfo`，對檔案跑 `IsSupported` / `GetPicture`（只印尺寸） |
 | `tools/re/hidden_run.py` | **首選**：背景逐檔矩陣（最小化 + 不啟動，不搶焦點），多 exe 對照，輸出不含檔名；`--modules` 列結束時的非系統模組；作法與不可行方案見 docstring |
 | `tools/re/run_sandbox.ps1` / `run_matrix.ps1` | 舊版（Start-Process，**會搶前景焦點**）；run_sandbox 仍可用於逐秒記錄記憶體 |
 | `tools/re/pe_audit.py` | PE 安全旗標（ASLR/DEP/SafeSEH/GS）與內嵌函式庫指紋 |
@@ -146,7 +148,7 @@ History2Count=0
 每個樣本放獨立資料夾（BUG-3 實測：壞樣本與正常樣本同資料夾時，連正常那張也崩）。
 `ThumbDBDir` 留空時 Hamana 會在 exe 旁建 `HamanaThumb/`。
 
-坑（CONFIRMED）：Hamana 正常結束時會把視窗座標寫回 ini。若當時是最小化，`[Window]` 變成 `Left=-32000` `Right=-31840`（160x28）→ 之後每次啟動 D3D 以 client 高 0 建 device 失敗，跳「Direct3D裝置製作失敗」對話框（`hamana_d3d.log` 的 `BackBufferHeight = 0`）。修法：把座標改回上面的值。minidbg 已改用 `SW_SHOWNOACTIVATE`（不最小化）。
+坑（CONFIRMED，發生過兩次）：Hamana 正常結束時會把視窗座標寫回 ini（例：開**不存在的檔**時它會自行結束）。若當時是最小化，`[Window]` 變成 `Left=-32000` `Right=-31840`（160x28）→ 之後每次啟動 D3D 以 client 高 0 建 device 失敗，跳「Direct3D裝置製作失敗」對話框（`hamana_d3d.log` 的 `BackBufferHeight = 0`）。現已自動處理：`hidden_run.py` / `minidbg.py` 啟動前呼叫 `make_sandbox.reset_window()` 改回座標，`hidden_run.py` 也會略過不存在的目標檔。minidbg 用 `SW_SHOWNOACTIVATE`（不最小化）。
 
 ### 崩潰判定
 

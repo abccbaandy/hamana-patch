@@ -2,9 +2,9 @@
 
 修正 [Hamana](https://www.vector.co.jp/soft/win95/art/se311115.html) v1.48（2006/06/19）三個會造成**閃退**與**讀圖失敗**的缺陷。
 
-另外替 Hamana 開啟 DEP（資料執行防止），降低惡意圖檔利用舊解析器漏洞的風險。
+另外做兩項安全強化：開啟 DEP（資料執行防止），並讓 JPEG 改由系統 GDI+ 解碼、內建的 1998 年版 libjpeg 退場，降低惡意圖檔利用舊解析器漏洞的風險。
 
-補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 一項改動 94 bytes 程式碼；DEP 一項改 PE header 1 個 bit。
+補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 一項改動 94 bytes 程式碼；DEP 一項改 PE header 1 個 bit；JPEG 一項改 3 bytes 程式碼，另寫一個 ifgdip 設定檔。
 
 > **本專案不包含 Hamana 本體**，請自備。這裡提供的是 patcher 與研究文件。
 
@@ -17,6 +17,7 @@ Bug-fix patches for Hamana v1.48 (2006), a Direct3D-based image viewer for Windo
 - **Crash on JPEGs with corrupt EXIF**: Hamana's EXIF parser uses VS2005 checked iterators; an out-of-range IFD offset calls `_invalid_parameter_noinfo` and the process dies with `0xC000000D` — even when the bad JPEG is merely a neighbour being prefetched. The patch hooks the CRT `_invalid_parameter` and, when the innermost SEH frame belongs to one of the three EXIF parser functions, unwinds to that function's normal exit so only the EXIF is skipped. Other code paths behave exactly as before.
 - **Images failing to load**: Hamana dispatches decoders by *file extension*, never by content. WebP files named `.jpg` are handed to libjpeg and fail. The patch makes `ifwebp.spi` also claim `*.jpg`, relying on Hamana's automatic fallback when a Susie plugin reports the format as unsupported.
 - **Hardening — DEP**: `Hamana.exe` lacks the `NX_COMPAT` flag, and Windows client editions default to the OptIn DEP policy, so Hamana runs without DEP. Its built-in parsers (libjpeg 1998, zlib 1.1.4, a hand-written EXIF parser) are statically linked and the exe has no ASLR. The patch sets `NX_COMPAT` (one bit). See `docs/attack-surface.md`.
+- **Hardening — JPEG via GDI+**: Hamana's decoder dispatch never hands `.jpg` to GDI+, so every JPEG ends up in the statically linked libjpeg 6b (1998). Three 1-byte jump patches route `.jpg` to `ifgdip.spi` (GDI+) instead; `ifwebp.spi` still picks up mislabelled WebP. `ifgdip.spi` ignores JPEG by default and its ini path is buggy (it reads `DefaultSPIs\ifgdip.spiifgdip.ini`), so the patcher writes `jpg=1` there. Side effect: CMYK JPEGs, which the built-in libjpeg rejects, now open.
 
 The zip and WebP patches only rewrite string constants; the EXIF patch changes 94 bytes of code (a 9-byte hook plus an 85-byte stub placed in existing `int3` padding). File sizes are unchanged and `--revert` restores the originals. **Hamana itself is not distributed here.**
 
@@ -104,17 +105,20 @@ python apply_patches.py "C:\path\to\Hamana" --revert
 | `Hamana.exe` | UTF-16 字串 `"zip"` → `"zzq"`、`"cbz"` → `"czq"` | 停用內建解壓，交給 `ax7z.spi` + `7z.dll` |
 | `Hamana.exe` | hook CRT `_invalid_parameter`（9 bytes）+ stub（85 bytes，放在既有 `int3` 填充區） | EXIF 越界時只放棄該段 EXIF，圖照常顯示 |
 | `Hamana.exe` | PE header `DllCharacteristics` 加上 `NX_COMPAT`（1 bit） | 行程啟用 DEP（原版在 Windows 預設 OptIn 政策下沒有 DEP） |
+| `Hamana.exe` | 解碼分派函式的 3 個條件跳躍改成無條件（3 bytes） | `.jpg` 改由 GDI+ 解碼，內建 libjpeg 不再解像素 |
+| `DefaultSPIs/ifgdip.spiifgdip.ini` | 新增 `[ifgdip] jpg=1` | 讓 `ifgdip.spi` 接受 jpg（檔名怪是因為 ifgdip 組路徑的 bug，見下） |
 | `DefaultSPIs/ifwebp.spi` | 宣告 `*.webp` → `*.webp;*.jpg;*.jpeg` | 接手副檔名錯置的 WebP |
 | `Hamana.ini` | `Respect_libjpeg=0` | 上一項的生效前提 |
 | `ax7z.spi.ini` | `user_extensions` 追加 `cbz;cbr` | `.cbz` 的配套（7z.dll 清單沒有它） |
 
 ### 為什麼有效
 
-Hamana 有三個可介入的接縫：
+Hamana 有四個可介入的接縫：
 
 1. **找不到內建 handler 時，會把檔案交給 Susie SPI。** 內建壓縮格式是用字串常數 `"zip"` / `"cbz"` 認定的，改掉它們就等於停用內建解壓。
-2. **SPI 的 `IsSupported` 回報不支援時，Hamana 會自動回退**到下一個解碼器。因此 SPI 可以安全地「多宣告」副檔名——真 JPEG 會被 `ifwebp.spi` 拒絕，然後回退給 libjpeg，不受影響。
-3. **EXIF 解析器的三個函式都有標準 C++ EH frame。** 越界時 CRT 會先呼叫 `_invalid_parameter`；在這裡依最內層 SEH 框架判斷「是不是 EXIF 解析中」，是的話就把堆疊還原到該函式的正常出口。非 EXIF 路徑完全照舊。
+2. **SPI 的 `IsSupported` 回報不支援時，Hamana 會自動回退**到下一個解碼器。因此 SPI 可以安全地「多宣告」副檔名——補丁後 `.jpg` 先交給 GDI+，GDI+ 讀不了的（例如內容其實是 WebP）再交給 `ifwebp.spi`。
+3. **解碼分派順序寫死在一個函式裡**（`0x45a780`）：原版的 jpg 會被排除在 GDI+ 之外，最後一定進內建 libjpeg。改掉 3 個條件跳躍就能把 jpg 導向 GDI+。`ifgdip.spi` 預設不收 jpg，而它讀設定時忘了去掉自己的檔名，實際讀的是 `DefaultSPIs\ifgdip.spiifgdip.ini`，所以設定得寫在這個怪檔名裡。
+4. **EXIF 解析器的三個函式都有標準 C++ EH frame。** 越界時 CRT 會先呼叫 `_invalid_parameter`；在這裡依最內層 SEH 框架判斷「是不是 EXIF 解析中」，是的話就把堆疊還原到該函式的正常出口。非 EXIF 路徑完全照舊。
 
 詳細原理、重現方式與實測資料見 [`docs/`](docs/)。
 
@@ -134,6 +138,10 @@ Hamana 有三個可介入的接縫：
 | 真 JPEG / 真 WebP / rar / 7z / 資料夾 / 單張圖 | 正常 | 正常（無退化） |
 | DEP（`GetProcessMitigationPolicy`） | 關閉 | 開啟（permanent） |
 | 開啟 DEP 後：jpg / png / 透明 png / gif / bmp / webp / zip / cbz / 資料夾預讀 | 正常 | 正常（無退化） |
+| 誰解 JPEG 像素 | 內建 libjpeg（1998） | 系統 GDI+（libjpeg 只剩讀 EXIF 用的檔頭解析） |
+| JPEG：4:2:0 / 4:2:2 / 4:4:4 / 漸進式 / 灰階 / restart marker / 截斷檔 / 1x1 / 4001x3001 / `.jpeg` / `.JPG` / 壓縮檔內 | 正常 | 正常（無退化） |
+| **CMYK JPEG** | **讀取失敗** | **正常** |
+| BMP / PNG 內容 + `.jpg` 副檔名 | 讀取失敗 | 正常（GDI+ 依內容判斷） |
 
 加密 zip 那列是意外收穫：`ax7z.txt` §8 把「Hamana 開不了加密 zip」列為 *Susie plugin 端無法對應*的限制，原因正是內建優先。補丁連帶解除了它。
 
@@ -143,7 +151,8 @@ Hamana 有三個可介入的接縫：
 
 - 目前只在 **Hamana v1.48（2006/06/19）** 上驗證。patcher 會核對字串簽章，版本不符會拒絕執行，不會弄壞檔案。
 - 補丁後 `DefaultSPIs/ax7z.spi` 與 `DefaultSPIs/7z.dll` 成為**必要元件**，請勿刪除 `DefaultSPIs` 資料夾。
-- `Respect_libjpeg=0` 會改變真 JPEG 的解碼優先序（每張多一次 SPI 詢問）。實測沒有可見的效能或畫質差異，但未做大量圖的量測。
+- JPEG 補丁後 `DefaultSPIs/ifgdip.spi` 也是**必要元件**；找不到它時 patcher 會略過這一項（否則 JPEG 全部開不了）。`Respect_libjpeg` 不再有作用。
+- GDI+ 與內建 libjpeg（有 x86 SIMD）的解碼速度未做量測；4001x3001 的 JPEG 實測可在數秒內開啟。
 - 所有變更都會先備份成 `*.orig`，`--revert` 可完整還原。
 - 日後解壓或 WebP 再出問題，可直接更換 `DefaultSPIs/` 底下的 `7z.dll` 或 `ifwebp.spi` 版本處理，不必再動 exe。
 

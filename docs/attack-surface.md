@@ -27,7 +27,7 @@
 
 | 格式 | 實作 | 版本 / 證據 | 開關 | 本機目前 | 風險 |
 |---|---|---|---|---|---|
-| JPEG | IJG libjpeg + x86 SIMD 1.0 | 1994-1998 版權字串；`Hamana.txt:83` | `Respect_libjpeg` 只改先後，**無法關閉** | 0 | 高：所有 `.jpg/.jpeg` 最後必進 libjpeg（ifwebp 拒收後），且永不交給 GDI+（CONFIRMED，分派 `0x45a780`） |
+| JPEG | IJG libjpeg + x86 SIMD 1.0 | 1994-1998 版權字串；`Hamana.txt:83` | `Respect_libjpeg` 只改先後，無法關閉 → **已 patch 退場**（`tools/patch_hamana_jpeg.py`） | — | 原版高（所有 jpg 必進 libjpeg）。patch 後像素改由 GDI+ 解；libjpeg 殘留見下「JPEG 退場」 |
 | EXIF | 自寫，3 個函式 | `bugs.md` BUG-3 | 無；`ShowExif*Info` 只管顯示 | 每張 JPEG 都會解析 | 中（已知會越界讀取，已由 L0b 攔截） |
 | PNG | **無可達的內建解碼器**（CONFIRMED） | 兩組 PNG 字串都是 D3DX 孤兒資料（libpng 1.0.5 reader / writer，無 xref）；開 PNG 時 inflate 不命中；移除 `ifgdip.spi` 後任何設定都讀不出 PNG | `Respect_internalPNGDec` 只決定是否先問 GDI+ | 1 | 無（PNG 一律 GDI+）；不必改設定 |
 | zip / cbz | minizip 0.15 + zlib 1.1.4 | `hamana-internals.md` | L0 patch | 已退場 | 已消除 |
@@ -61,10 +61,25 @@
 - 正控制組：刪掉安裝目錄的 `HamanaLang.dll` 且工作目錄 = 圖片資料夾 → 會載入 `<target>\hamanalang.dll`。**安裝目錄缺檔時會被劫持**，不要刪 `HamanaLang.dll`。
 - 未涵蓋：migemo 搜尋功能實際觸發時（路徑已靜態確認為絕對路徑）。
 
+## JPEG 退場（CONFIRMED，`tools/patch_hamana_jpeg.py`，已併入 `apply_patches.py` 第 2c 步）
+
+- 改法：分派函式 3 個條件跳躍（`0x45a905`、`0x45a96e`、`0x45aadc`）→ jmp；加上 `DefaultSPIs/ifgdip.spiifgdip.ini` 的 `[ifgdip] jpg=1`（ifgdip 預設不宣告 jpg，且 ini 路徑有 bug，見 `hamana-internals.md`）。兩者缺一 jpg 就開不了。
+- libjpeg 的所有入口（`jpeg_CreateDecompress` 只有 `0x452848` 一處，核心 `0x452720`）：
+
+| 呼叫者 | 用途 | patch 後 |
+|---|---|---|
+| `0x45a450`（分派第 2、5 步） | 解像素 | 不再到達 |
+| `0x456fc0`（SPI 解 jpg 成功後） | `jpeg_read_header` + `save_markers(APP1)` → 自寫 EXIF 解析 | 仍會跑，只讀檔頭（`[ebp+0x70]!=0` 直接返回，`jpeg_start_decompress` `0x4bc850` 不命中） |
+| `0x4659e0`（另一執行緒） | 解 ThumbDB（`HamanaThumb\*.mcf`，Hamana 自己用 `0x452c80` 編碼的） | 仍會跑；輸入非外部檔（guess：DB 只由 `0x465de0` 寫入） |
+
+- 殘留攻擊面：libjpeg marker 解析（jdmarker）+ 自寫 EXIF 解析（已有 L0b 越界防護）。要完全去掉需讓 `0x456fc0` 不跑（失去 EXIF 顯示），未做。
+- 回歸（沙箱，原版 vs patch）：4:2:0/4:2:2/4:4:4、漸進式、灰階、restart marker、截斷、1x1、4001x3001、`.jpeg`、`.JPG`、7z 內 jpg、WebP 改名 `.jpg`、EXIF fuzz 19 種（逐檔 + 同資料夾預讀）、PNG 8 種、壓縮檔 8 種 → 全部 ALIVE、尺寸一致。CMYK JPEG：原版讀不出，patch 後正常；BMP/PNG 改名 `.jpg` 也變得讀得出。`apply_patches --revert` 後 exe/ifwebp 與原檔 hash 相同。
+- 未測：GDI+ 對大量圖的解碼速度；EXIF 資訊視窗、投影片、縮圖模式。
+
 ## 建議順序
 
 1. ~~DEP~~ 已完成。
 2. ~~PNG~~ 不需處理：沒有內建 PNG 解碼器可達。
 3. ~~Formats/Codecs~~ 從未載入，不在攻擊面上。
 4. ~~DLL 搜尋路徑~~ 開檔不會被劫持。
-5. **JPEG**：唯一還在用的高風險內建解析器（libjpeg 6b 1998 + 自寫 EXIF）。可選方案（unknown，未實作）：patch 分派函式的 3 個條件跳躍（`0x45a905` 跳過第 2 步、`0x45aadc` 跳過第 5 步、`0x45a96e` 讓 jpeg 也算 `gdipExt`），讓 `.jpg` 改走 GDI+，ifwebp 仍在第 4 步接手 WebP。要驗證：CMYK/漸進式 JPEG、EXIF 顯示（`0x456fc0` 仍會跑）、縮圖與壓縮檔內 JPEG 是否走同一函式、解碼速度。
+5. ~~JPEG~~ 已退場（見上）。剩：EXIF 讀取時的 libjpeg 檔頭解析 + 自寫 EXIF 解析；GIF 特殊路徑（unknown）。

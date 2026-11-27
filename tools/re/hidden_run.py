@@ -25,6 +25,9 @@ import re
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from make_sandbox import reset_window  # noqa: E402
+
 k32 = C.WinDLL('kernel32', use_last_error=True)
 u32 = C.WinDLL('user32', use_last_error=True)
 
@@ -128,6 +131,8 @@ def fg_pid():
 
 
 def run_one(exe, target, seconds, want_mods=False):
+    if reset_window(os.path.dirname(exe)):
+        print('  [修正] 沙箱 ini 的視窗座標被寫成最小化（-32000），已改回', flush=True)
     si = STARTUPINFO()
     si.cb = C.sizeof(si)
     si.dwFlags = STARTF_USESHOWWINDOW
@@ -189,6 +194,9 @@ def main():
     ap.add_argument('targets', nargs='+')
     a = ap.parse_args()
     for f in expand(a.targets):
+        if not os.path.exists(f):
+            print(f'{os.path.basename(f):<24} 不存在，略過（開不存在的檔會讓 Hamana 正常結束並寫壞 ini）', flush=True)
+            continue
         row, extra = [os.path.basename(f).ljust(24)], []
         for i, exe in enumerate(a.exe):
             res, t, mods = run_one(os.path.abspath(exe), os.path.abspath(f), a.seconds, a.modules)

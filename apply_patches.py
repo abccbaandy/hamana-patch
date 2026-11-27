@@ -6,6 +6,8 @@
   1. Hamana.exe          停用內建 zip/cbz 解壓，改由 ax7z.spi + 7z.dll 接手
   2. Hamana.exe          EXIF 越界防護：壞 EXIF 的 JPEG 不再閃退（0xC000000D）
   2b. Hamana.exe         開啟 DEP（PE header NX_COMPAT bit；見 docs/attack-surface.md）
+  2c. Hamana.exe         jpg 改由 GDI+（ifgdip.spi）解碼，內建 libjpeg 1998 退場（3 bytes）
+                         + DefaultSPIs/ifgdip.spiifgdip.ini 設 jpg=1（ifgdip 的 ini 路徑 bug，見工具 docstring）
   3. DefaultSPIs/ifwebp.spi  讓它同時宣告 *.jpg / *.jpeg，修正副檔名錯置的 WebP
   4. Hamana.ini          Respect_libjpeg=0（第 3 項的生效前提）
   5. ax7z.spi.ini        user_extensions 追加 cbz;cbr（第 1 項的配套）
@@ -33,6 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'too
 import patch_hamana_zip as zip_patch          # noqa: E402
 import patch_hamana_exif as exif_patch        # noqa: E402
 import patch_hamana_nx as nx_patch            # noqa: E402
+import patch_hamana_jpeg as jpeg_patch        # noqa: E402
 import patch_ifwebp as webp_patch             # noqa: E402
 
 
@@ -99,6 +102,8 @@ def do_check(hamana_dir):
     print('[2/4] Hamana.exe（EXIF）')
     exif_patch.do_check(exe)
     print('  DEP（NX_COMPAT）：%s' % ('ON' if nx_patch.status(exe) else 'OFF ← 建議開啟'))
+    print('  JPEG 解碼器：', end='')
+    jpeg_patch.do_check(exe)
     print()
     print('[3/4] DefaultSPIs/ifwebp.spi')
     if spi:
@@ -134,6 +139,12 @@ def do_apply(hamana_dir, ax7z_ini):
     print('[2b/5] 開啟 DEP')
     print('  NX_COMPAT %s' % ('ON' if nx_patch.apply(exe) else '已是 ON'))
     print()
+    print('[2c/5] jpg 改由 GDI+ 解碼')
+    try:
+        jpeg_patch.do_patch(exe)
+    except SystemExit as e:
+        print('  %s' % e)
+    print()
     print('[3/5] 修正 WebP 副檔名分派')
     if spi:
         webp_patch.do_patch(spi)
@@ -159,6 +170,10 @@ def do_revert(hamana_dir):
     print('[1/3] Hamana.exe')
     if nx_patch.apply(exe, enable=False):
         print('  已關閉 DEP（NX_COMPAT）')
+    try:
+        jpeg_patch.do_revert(exe)
+    except SystemExit as e:
+        print('  %s' % e)
     try:
         exif_patch.do_revert(exe)
     except SystemExit as e:
