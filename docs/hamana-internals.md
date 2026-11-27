@@ -23,6 +23,19 @@
 | `Respect_Ghostscript` | `PDF/AI/EPS/PS display use a built-in decoder(Ghostscript).` |
 | `Respect_internalPNGDec` / `Respect_Gdiplus` | 同類優先序開關 |
 
+ini 載入（`0x4080e2` 起）→ 全域旗標：`Respect_libjpeg`→`[0x67bfc8]`、`Respect_internalPNGDec`→`[0x67bfc9]`、`Respect_Gdiplus`→`[0x67bfca]`、`Respect_Ghostscript`→`[0x67bfcb]`。
+
+開圖分派函式 `0x45a780`（CONFIRMED，反組譯 + 沙箱矩陣）。`isJpeg` = `0x455b10`（比對 `jpg`/`jpeg`），`gdipExt` = 副檔名在 map `0x68ec04` 且非 jpeg：
+1. `gif` 特殊路徑（`0x456ca0`、`[0x68e4dd]`，guess：動畫 GIF）
+2. `Respect_libjpeg && isJpeg` → 內建 libjpeg `0x45a450`
+3. `(Respect_internalPNGDec && ext==png) || Respect_Gdiplus` → 若 `gdipExt`：`ifgdip.spi`（物件 `0x68eb94`，經 `0x463630`）
+4. 一般 SPI 迴圈（清單 `0x68eb5c`，每筆 0x80 bytes；`[+2]!=0` 的略過）
+5. `!Respect_libjpeg && isJpeg` → 內建 libjpeg
+6. 第 3 步沒試過且 `gdipExt` → `ifgdip.spi`
+- 成功後 `isJpeg` 時呼叫 `0x456fc0`（guess：EXIF 讀取）。
+- 推論：**jpg/jpeg 永遠不會交給 GDI+**（BMP 改名 `.jpg` 在所有設定都讀不出；改名 `.png` 則讀得出）；**exe 內沒有可達的 PNG 解碼器**，`Respect_internalPNGDec` 實際只決定 PNG 是否先問 GDI+。
+- PNG 相關字串兩組皆在靜態連結的 D3DX 區（libpng `1.0.5` 與 PNG writer），無 code xref、無 libpng 錯誤字串 → 孤兒資料（guess）；開 PNG 時 zlib inflate（`0x4d6110`/`0x4d6760`）在任何設定都不命中（CONFIRMED，正控制組 = 原版開 zip 會命中）。
+
 `DefaultSPIs/` 各 plugin 宣告的副檔名（自 binary 字串取得）：
 
 | plugin | 宣告 | 備註 |
@@ -91,9 +104,10 @@ UV_CACHE_DIR=<非 AppData 的 cache 目錄> uv pip install --python .venv capsto
 
 | 工具 | 用途 |
 |---|---|
-| `tools/re/minidbg.py` | ctypes 小 debugger（64-bit Python 可除 32-bit），`--bp VA` 命中時列暫存器與堆疊中的 return address（模組+偏移）。預設 bp `0x5bfbf4` |
+| `tools/re/minidbg.py` | ctypes 小 debugger（64-bit Python 可除 32-bit），`--bp VA` 命中時列暫存器與堆疊中的 return address（模組+偏移）。預設 bp `0x5bfbf4`。`--loads` 逐筆記錄 DLL 載入（含用完即釋放的），`--cwd` 指定工作目錄；**必須在 PowerShell 執行**（Git Bash 會弄壞參數 → `CreateProcess failed 2`） |
 | `tools/re/disasm.py <exe> <VA> [back] [n]` | 反組譯 VA 附近 |
-| `tools/re/hidden_run.py` | **首選**：背景逐檔矩陣（最小化 + 不啟動，不搶焦點），多 exe 對照，輸出不含檔名；作法與不可行方案見 docstring |
+| `tools/re/make_sandbox.py <安裝目錄> <沙箱> [--exe Hamana.exe.orig] [--set K=V] [--drop-spi X]` | 建沙箱（自動套下方 ini 覆寫、去掉 Recent File List） |
+| `tools/re/hidden_run.py` | **首選**：背景逐檔矩陣（最小化 + 不啟動，不搶焦點），多 exe 對照，輸出不含檔名；`--modules` 列結束時的非系統模組；作法與不可行方案見 docstring |
 | `tools/re/run_sandbox.ps1` / `run_matrix.ps1` | 舊版（Start-Process，**會搶前景焦點**）；run_sandbox 仍可用於逐秒記錄記憶體 |
 | `tools/re/pe_audit.py` | PE 安全旗標（ASLR/DEP/SafeSEH/GS）與內嵌函式庫指紋 |
 | `tools/re/exif_check.py` / `make_exif_fuzz.py` | EXIF 結構檢查 / 產生損壞樣本 |
@@ -131,6 +145,8 @@ History2Count=0
 注意：**開單一檔案 = 進入其所在資料夾並背景預讀鄰居**。要測「這一張」是否致命，
 每個樣本放獨立資料夾（BUG-3 實測：壞樣本與正常樣本同資料夾時，連正常那張也崩）。
 `ThumbDBDir` 留空時 Hamana 會在 exe 旁建 `HamanaThumb/`。
+
+坑（CONFIRMED）：Hamana 正常結束時會把視窗座標寫回 ini。若當時是最小化，`[Window]` 變成 `Left=-32000` `Right=-31840`（160x28）→ 之後每次啟動 D3D 以 client 高 0 建 device 失敗，跳「Direct3D裝置製作失敗」對話框（`hamana_d3d.log` 的 `BackBufferHeight = 0`）。修法：把座標改回上面的值。minidbg 已改用 `SW_SHOWNOACTIVATE`（不最小化）。
 
 ### 崩潰判定
 

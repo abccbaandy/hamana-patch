@@ -13,6 +13,9 @@
   Hamana 自行還原視窗時也看不到。
 - 不可行：CreateDesktop 建隱藏桌面再在上面跑 → 視窗建得出來，但標題停在 "Hamana"、圖不載入（guess：D3D9 在非輸入桌面建不了 device）。
 - run_matrix.ps1 的 Start-Process 以一般方式顯示 → 會搶焦點。
+
+--modules：結束前列出行程內非系統模組（Windows 目錄以外），路徑以 <exe>/<target> 遮蔽。
+用來判定 Formats/*.dll 有無載入、資料夾內預放的 DLL 有無被載入（DLL 搜尋路徑）。
 """
 import argparse
 import ctypes as C
@@ -56,6 +59,48 @@ k32.TerminateProcess.argtypes = [W.HANDLE, W.UINT]
 k32.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
 k32.CloseHandle.argtypes = [W.HANDLE]
 
+TH32CS_SNAPMODULE = 0x8
+TH32CS_SNAPMODULE32 = 0x10
+
+
+class MODULEENTRY32W(C.Structure):
+    _fields_ = [('dwSize', W.DWORD), ('th32ModuleID', W.DWORD), ('th32ProcessID', W.DWORD),
+                ('GlblcntUsage', W.DWORD), ('ProccntUsage', W.DWORD), ('modBaseAddr', C.c_void_p),
+                ('modBaseSize', W.DWORD), ('hModule', W.HMODULE), ('szModule', W.WCHAR * 256),
+                ('szExePath', W.WCHAR * 260)]
+
+
+k32.CreateToolhelp32Snapshot.restype = W.HANDLE
+k32.CreateToolhelp32Snapshot.argtypes = [W.DWORD, W.DWORD]
+k32.Module32FirstW.argtypes = [W.HANDLE, C.POINTER(MODULEENTRY32W)]
+k32.Module32NextW.argtypes = [W.HANDLE, C.POINTER(MODULEENTRY32W)]
+WINDIR = os.path.normcase(os.environ.get('SystemRoot', r'C:\Windows'))
+
+
+def modules(pid, exe, target):
+    """非系統模組，路徑遮蔽成 <exe>/... 或 <target>/...。"""
+    h = k32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
+    if h in (None, W.HANDLE(-1).value):
+        return ['<snapshot err %d>' % C.get_last_error()]
+    out, me = [], MODULEENTRY32W()
+    me.dwSize = C.sizeof(me)
+    roots = [(os.path.normcase(os.path.dirname(exe)), '<exe>'), (os.path.normcase(os.path.dirname(target)), '<target>')]
+    ok = k32.Module32FirstW(h, C.byref(me))
+    while ok:
+        p = os.path.normcase(me.szExePath)
+        if not p.startswith(WINDIR):
+            for r, tag in roots:
+                if p.startswith(r + os.sep):
+                    p = tag + p[len(r):]
+                    break
+            else:
+                p = '<other>' + os.sep + os.path.basename(p)
+            out.append(p)
+        ok = k32.Module32NextW(h, C.byref(me))
+    k32.CloseHandle(h)
+    return sorted(out)
+
+
 TITLE_RX = re.compile(r'\((\d+/\d+)\)\s*(\[[^\]]+\])?')
 
 
@@ -82,7 +127,7 @@ def fg_pid():
     return p.value
 
 
-def run_one(exe, target, seconds):
+def run_one(exe, target, seconds, want_mods=False):
     si = STARTUPINFO()
     si.cb = C.sizeof(si)
     si.dwFlags = STARTF_USESHOWWINDOW
@@ -92,7 +137,7 @@ def run_one(exe, target, seconds):
     if not k32.CreateProcessW(exe, cmd, None, None, False, CREATE_UNICODE_ENVIRONMENT, None,
                               os.path.dirname(exe), C.byref(si), C.byref(pi)):
         return f'CreateProcess err {C.get_last_error()}', '-'
-    title, res, stole = '', None, False
+    title, res, stole, mods = '', None, False, None
     t0 = time.time()
     try:
         while time.time() - t0 < seconds:
@@ -109,6 +154,8 @@ def run_one(exe, target, seconds):
                     title = t
         if res is None:
             res = 'ALIVE'
+            if want_mods:
+                mods = modules(pi.dwProcessId, exe, target)
             k32.TerminateProcess(pi.hProcess, 1)
             k32.WaitForSingleObject(pi.hProcess, 5000)
     finally:
@@ -116,7 +163,7 @@ def run_one(exe, target, seconds):
         k32.CloseHandle(pi.hProcess)
     m = TITLE_RX.search(title)
     t = f'({m.group(1)}) {m.group(2) or ""}'.strip() if m else '-'
-    return res + (' FOCUS' if stole else ''), t
+    return res + (' FOCUS' if stole else ''), t, mods
 
 
 def expand(paths):
@@ -138,14 +185,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--exe', action='append', required=True)
     ap.add_argument('--seconds', type=float, default=8)
+    ap.add_argument('--modules', action='store_true')
     ap.add_argument('targets', nargs='+')
     a = ap.parse_args()
     for f in expand(a.targets):
-        row = [os.path.basename(f).ljust(24)]
-        for exe in a.exe:
-            res, t = run_one(os.path.abspath(exe), f, a.seconds)
+        row, extra = [os.path.basename(f).ljust(24)], []
+        for i, exe in enumerate(a.exe):
+            res, t, mods = run_one(os.path.abspath(exe), os.path.abspath(f), a.seconds, a.modules)
             row.append(f'{res:<22} {t:<22}')
+            if mods is not None:
+                extra.append(f'  exe#{i} modules: ' + ' '.join(mods))
         print(' | '.join(row), flush=True)
+        for e in extra:
+            print(e, flush=True)
 
 
 if __name__ == '__main__':

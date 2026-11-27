@@ -1,7 +1,7 @@
 # 攻擊面盤點（惡意檔案 → 記憶體破壞）
 
 目的：決定哪些內建解析器要 patch 退場、改交外部 DLL。威脅模型 = 使用者開啟不可信的圖片 / 壓縮檔 / 資料夾。
-工具：`tools/re/pe_audit.py`（安全旗標 + 內嵌函式庫指紋；`--root` 遮蔽安裝路徑）。
+工具：`tools/re/pe_audit.py`（安全旗標 + 內嵌函式庫指紋；`--root` 遮蔽安裝路徑）；分派順序與沙箱/除錯工具見 `hamana-internals.md`。
 狀態旗標：CONFIRMED / guess / unknown。
 
 ## 緩解機制（CONFIRMED，`pe_audit.py` 對原版 exe）
@@ -27,12 +27,12 @@
 
 | 格式 | 實作 | 版本 / 證據 | 開關 | 本機目前 | 風險 |
 |---|---|---|---|---|---|
-| JPEG | IJG libjpeg + x86 SIMD 1.0 | 1994-1998 版權字串；`Hamana.txt:83` | `Respect_libjpeg` | 0 | 高（舊版，靜態連結） |
+| JPEG | IJG libjpeg + x86 SIMD 1.0 | 1994-1998 版權字串；`Hamana.txt:83` | `Respect_libjpeg` 只改先後，**無法關閉** | 0 | 高：所有 `.jpg/.jpeg` 最後必進 libjpeg（ifwebp 拒收後），且永不交給 GDI+（CONFIRMED，分派 `0x45a780`） |
 | EXIF | 自寫，3 個函式 | `bugs.md` BUG-3 | 無；`ShowExif*Info` 只管顯示 | 每張 JPEG 都會解析 | 中（已知會越界讀取，已由 L0b 攔截） |
-| PNG | 內建解碼器 + zlib 1.1.4 | `IHDR`/`IDAT`/`PLTE`/`tRNS` 字串有兩組 | `Respect_internalPNGDec` | **1** | 高（zlib 1.1.4 有已知 inflate 漏洞） |
+| PNG | **無可達的內建解碼器**（CONFIRMED） | 兩組 PNG 字串都是 D3DX 孤兒資料（libpng 1.0.5 reader / writer，無 xref）；開 PNG 時 inflate 不命中；移除 `ifgdip.spi` 後任何設定都讀不出 PNG | `Respect_internalPNGDec` 只決定是否先問 GDI+ | 1 | 無（PNG 一律 GDI+）；不必改設定 |
 | zip / cbz | minizip 0.15 + zlib 1.1.4 | `hamana-internals.md` | L0 patch | 已退場 | 已消除 |
-| GIF | unknown | 副檔名表 `gif`（offset 2236736） | unknown | — | unknown |
-| D3DX | 靜態連結（`File created by Microsoft D3DX library`、shader 編譯器字串） | guess：其中一組 PNG 字串來自 D3DX 的 texture loader | — | — | unknown |
+| GIF | unknown；分派函式第一步的特殊路徑（`0x456ca0`），guess：動畫 GIF | 副檔名表 `gif`（offset 2236736） | unknown | — | unknown |
+| D3DX | 靜態連結（shader 編譯器、HDR writer 字串） | PNG 字串為孤兒資料（見 PNG 列）；是否用 D3DX 載入使用者檔案：unknown（guess：只載 `BaseTextures/`） | — | — | 低，unknown |
 | `.lnk`、library 檔 | 自寫 | `Hamana.txt:253` | — | — | 低到中，unknown |
 
 ## 外部解析器（經 SPI 或系統 DLL）
@@ -45,24 +45,26 @@
 | pdf/ai/eps/ps | Ghostscript `gsdll32.dll`（`GSDllPath`） | 未安裝、`GSDllPath` 空 → 未啟用 |
 | 影片（`[Movie] Extensions`，含 `.gif`） | DirectShow + 系統 codec | `EnablePlayMovie=0` → 關閉 |
 
-## 疑似未使用（guess）
+## 未使用的元件（CONFIRMED）
 
-- `Formats/`、`Codecs/`（7-zip 4.x，2006）：exe 內沒有 `Formats` / `Codecs` 字串。`ax7z.spi`（2015）用的是同目錄的 `DefaultSPIs/7z.dll`（`ax7z.txt:48`）。可能是 `ax7z.spi_old` 的遺留。要在沙箱開 rar/7z 後列出載入的模組確認，確認未載入就可以刪除。
+- `Formats/`、`Codecs/`（7-zip 4.x，2006）從未載入：`minidbg.py --loads` 開真 7z、zip 改名 rar/cbr/lzh/arj/cab，只載入 `DefaultSPIs/7z.dll`。不在攻擊面上，刪不刪都一樣；`ax7z.spi_old`、`ifwebp.spi_` 也不會被載入（副檔名不符）。
 
-## DLL 搜尋路徑（guess，待驗證）
+## DLL 搜尋路徑（CONFIRMED：開檔不會從圖片資料夾載入 DLL）
 
-- exe 含 `tmigemo\migemo.dll`（`Migemo=1`）與 `gsdll32.dll` 字串，本機兩者都不存在。若是以相對路徑 `LoadLibrary`，搜尋範圍可能包含目前工作目錄 → 資料夾內預放同名 DLL 會被載入。
-- 驗證法（無害）：沙箱放一個只寫 log 的測試 DLL，開該資料夾後檢查有沒有被載入；同時記錄 Hamana 開檔後的工作目錄。
-
-## 待確認（unknown）
-
-- `Respect_*=0` 且 SPI 回報不支援時，回退到哪個內建解碼器？順序為何？`solutions.md` 只確認「會回退」。
-- 決定內建解析器能否完全退場：需知道各格式在目前 ini 下實際由誰解碼。判定法：沙箱 + 視窗標題（`hamana-internals.md`）、模組載入清單。
+- 所有 `LoadLibrary*` 呼叫點（`0x4075e6` 起，共 13 處）：
+  - `HamanaLang.dll`：相對名稱，但 exe 目錄優先 → 安全
+  - migemo：`GetModuleFileNameW` 取 exe 目錄 + `tmigemo\migemo.dll`（`0x4b41f8`→`0x4b3af2`），絕對路徑
+  - Ghostscript：`GSDllPath` 原值（`[0x67d918]`，`0x4a0d7e`）；預設空 → 不載入。使用者若只填檔名就會走搜尋路徑
+  - SPI：完整路徑；`7z.dll` 由 ax7z 從自身目錄載入
+  - `mfcm80u.dll` 只用 `GetModuleHandle`；`unicows.dll`、`d3d9.dll` 走系統目錄
+- 實測：圖片資料夾預放 `tmigemo\migemo.dll`、`gsdll32.dll`、`d3d9d.dll`、`mfcm80u.dll`、`unicows.dll`、`mscoree.dll`、`HamanaLang.dll`、`7z.dll`（誘餌 = 純資源 DLL），開 png/pdf/ps/7z，工作目錄設為 exe 目錄或圖片資料夾 → 都沒有載入。
+- 正控制組：刪掉安裝目錄的 `HamanaLang.dll` 且工作目錄 = 圖片資料夾 → 會載入 `<target>\hamanalang.dll`。**安裝目錄缺檔時會被劫持**，不要刪 `HamanaLang.dll`。
+- 未涵蓋：migemo 搜尋功能實際觸發時（路徑已靜態確認為絕對路徑）。
 
 ## 建議順序
 
-1. ~~DEP~~ 已完成（見上）。
-2. `Respect_internalPNGDec=0`，讓 PNG 交給 GDI+（改設定即可）；回歸測試透明 PNG。
-3. 驗證 `Formats/`、`Codecs/` 是否未載入 → 刪除。
-4. 驗證 DLL 搜尋路徑。
-5. 確認回退路徑後，再決定 JPEG / EXIF 要不要 patch 退場。
+1. ~~DEP~~ 已完成。
+2. ~~PNG~~ 不需處理：沒有內建 PNG 解碼器可達。
+3. ~~Formats/Codecs~~ 從未載入，不在攻擊面上。
+4. ~~DLL 搜尋路徑~~ 開檔不會被劫持。
+5. **JPEG**：唯一還在用的高風險內建解析器（libjpeg 6b 1998 + 自寫 EXIF）。可選方案（unknown，未實作）：patch 分派函式的 3 個條件跳躍（`0x45a905` 跳過第 2 步、`0x45aadc` 跳過第 5 步、`0x45a96e` 讓 jpeg 也算 `gdipExt`），讓 `.jpg` 改走 GDI+，ifwebp 仍在第 4 步接手 WebP。要驗證：CMYK/漸進式 JPEG、EXIF 顯示（`0x456fc0` 仍會跑）、縮圖與壓縮檔內 JPEG 是否走同一函式、解碼速度。

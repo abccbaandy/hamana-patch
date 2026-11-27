@@ -1,9 +1,12 @@
 """最小 Win32 debugger（ctypes，64-bit Python 可除錯 32-bit WOW64 行程）。
 
-用法: minidbg.py [--bp VA ...] [--timeout 秒] [--maxhits N] -- <exe> [args...]
+用法: minidbg.py [--bp VA ...] [--timeout 秒] [--maxhits N] [--loads] [--cwd DIR] -- <exe> [args...]
+- --loads：逐筆印出 LOAD_DLL 事件（路徑以 <exe>/<target>/<win>/<other> 遮蔽），可抓到用完即 FreeLibrary 的 DLL。
+- --cwd：行程起始工作目錄（預設 exe 目錄）。檔案總管開檔時通常是該檔所在資料夾。
 - 在指定 VA 下 int3；命中時印暫存器、EBP 鏈、堆疊中看似 return address 的值
   （前一指令為 call 且落在已載入模組內），並標註模組名+偏移。
 - 印出 first-chance exception（不吞掉，照樣交回程式處理）。
+- 以 SW_SHOWNOACTIVATE 啟動（不搶焦點；視窗靠沙箱 ini 放在畫面外）。
 - Hamana.exe 無 ASLR（ImageBase 0x400000），VA 可直接用。
 預設 bp：0x5bfbf4 = CRT _invalid_parameter（Hamana 1.48 的 0xC000000D 閃退入口）。
 """
@@ -94,12 +97,16 @@ k32.FlushInstructionCache.argtypes = [W.HANDLE, C.c_void_p, C.c_size_t]
 
 def main():
     argv = sys.argv[1:]
-    bps, timeout, maxhits = [], 60.0, 3
+    bps, timeout, maxhits, loads, cwd = [], 60.0, 3, False, None
     while argv and argv[0] != '--':
         if argv[0] == '--bp':
             bps.append(int(argv[1], 16)); argv = argv[2:]
         elif argv[0] == '--timeout':
             timeout = float(argv[1]); argv = argv[2:]
+        elif argv[0] == '--cwd':
+            cwd = argv[1]; argv = argv[2:]
+        elif argv[0] == '--loads':
+            loads = True; argv = argv[1:]
         elif argv[0] == '--maxhits':
             maxhits = int(argv[1]); argv = argv[2:]
         else:
@@ -109,8 +116,9 @@ def main():
         bps = [0x5bfbf4]
     cmd = ' '.join('"%s"' % a for a in argv)
     si = STARTUPINFO(); si.cb = C.sizeof(si); pi = PROCESS_INFORMATION()
+    si.dwFlags, si.wShowWindow = 1, 4  # STARTF_USESHOWWINDOW + SW_SHOWNOACTIVATE：不搶焦點。不可用最小化（7）：除錯下 D3D 以 client 高 0 建 device 失敗並跳對話框
     if not k32.CreateProcessW(None, C.create_unicode_buffer(cmd), None, None, False,
-                              DEBUG_ONLY_THIS_PROCESS, None, os.path.dirname(argv[0]), C.byref(si), C.byref(pi)):
+                              DEBUG_ONLY_THIS_PROCESS, None, cwd or os.path.dirname(argv[0]), C.byref(si), C.byref(pi)):
         sys.exit('CreateProcess failed %d' % C.get_last_error())
     hp = pi.hProcess
     mods = {}
@@ -144,11 +152,26 @@ def main():
         e = struct.unpack_from('<I', h, 0x3c)[0]
         return struct.unpack_from('<I', h, e + 0x50)[0]
 
-    def fname(hf):
+    def fullpath(hf):
         b = C.create_unicode_buffer(1024)
         if hf and k32.GetFinalPathNameByHandleW(hf, b, 1024, 0):
-            return os.path.basename(b.value)
+            return b.value[4:] if b.value.startswith('\\\\?\\') else b.value
         return '?'
+
+    def fname(hf):
+        return os.path.basename(fullpath(hf))
+
+    roots = [(os.path.normcase(os.path.dirname(os.path.abspath(argv[0]))), '<exe>'),
+             (os.path.normcase(os.environ.get('SystemRoot', r'C:\Windows')), '<win>')]
+    if len(argv) > 1:
+        roots.insert(1, (os.path.normcase(os.path.dirname(os.path.abspath(argv[1]))), '<target>'))
+
+    def masked(path):
+        q = os.path.normcase(path)
+        for r, tag in roots:
+            if q.startswith(r + os.sep):
+                return tag + q[len(r):]
+        return '<other>' + os.sep + os.path.basename(q)
 
     def sym(a):
         for base, (n, sz) in mods.items():
@@ -185,7 +208,10 @@ def main():
                 orig[va] = rd(va, 1); wr(va, b'\xcc')
         elif code == 6:
             base = ev.u.LoadDll.lpBaseOfDll
-            mods[base] = (fname(ev.u.LoadDll.hFile), modsize(base))
+            fp = fullpath(ev.u.LoadDll.hFile)
+            mods[base] = (os.path.basename(fp), modsize(base))
+            if loads:
+                print('[load] t=%.1fs %08x %s' % (time.time() - t0, base, masked(fp)), flush=True)
         elif code == 5:
             print('[exit] code=0x%08x  t=%.1fs' % (ev.u.ExitProcess.dwExitCode & 0xffffffff, time.time() - t0))
             break
