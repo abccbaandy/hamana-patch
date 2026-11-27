@@ -70,12 +70,25 @@
 | 呼叫者 | 用途 | patch 後 |
 |---|---|---|
 | `0x45a450`（分派第 2、5 步） | 解像素 | 不再到達 |
-| `0x456fc0`（SPI 解 jpg 成功後） | `jpeg_read_header` + `save_markers(APP1)` → 自寫 EXIF 解析 | 仍會跑，只讀檔頭（`[ebp+0x70]!=0` 直接返回，`jpeg_start_decompress` `0x4bc850` 不命中） |
-| `0x4659e0`（另一執行緒） | 解 ThumbDB（`HamanaThumb\*.mcf`，Hamana 自己用 `0x452c80` 編碼的） | 仍會跑；輸入非外部檔（guess：DB 只由 `0x465de0` 寫入） |
+| `0x456fc0`（SPI 解 jpg 成功後） | `jpeg_read_header` + `save_markers(APP1)` → 自寫 EXIF 解析 | 2c 後仍會跑；**2e（EXIF 退場）後整個函式本體不執行** → libjpeg marker + 自寫 EXIF 皆不跑 |
+| `0x4659e0`（另一執行緒） | 解 ThumbDB（`HamanaThumb\*.mcf`，Hamana 自己用 `0x452c80` 編碼的） | 仍會跑；輸入非外部檔（guess：DB 只由 `0x465de0` 寫入），不在攻擊面上 |
 
-- 殘留攻擊面：libjpeg marker 解析（jdmarker）+ 自寫 EXIF 解析（已有 L0b 越界防護）。要完全去掉需讓 `0x456fc0` 不跑（失去 EXIF 顯示），未做。
+- 殘留攻擊面（2c 後）：libjpeg marker 解析（jdmarker）+ 自寫 EXIF 解析。**已由 2e 完全退場**（見下「EXIF 退場」），對外 JPEG 路徑不再碰 libjpeg。
 - 回歸（沙箱，原版 vs patch）：4:2:0/4:2:2/4:4:4、漸進式、灰階、restart marker、截斷、1x1、4001x3001、`.jpeg`、`.JPG`、7z 內 jpg、WebP 改名 `.jpg`、EXIF fuzz 19 種（逐檔 + 同資料夾預讀）、PNG 8 種、壓縮檔 8 種 → 全部 ALIVE、尺寸一致。CMYK JPEG：原版讀不出，patch 後正常；BMP/PNG 改名 `.jpg` 也變得讀得出。`apply_patches --revert` 後 exe/ifwebp 與原檔 hash 相同。
-- 未測：GDI+ 對大量圖的解碼速度；EXIF 資訊視窗、投影片、縮圖模式。
+- 未測：GDI+ 對大量圖的解碼速度；投影片、縮圖模式。
+
+## EXIF 退場（CONFIRMED，`tools/patch_hamana_exif_retire.py`，已併入 `apply_patches.py` 第 2e 步）
+
+2c 後 libjpeg 的殘留入口只剩 `0x456fc0`（SPI 解 jpg 成功後擷取 EXIF，由 dispatcher `0x45a780` 的 `0x45a9e2` / `0x45aa9f` 呼叫）。其內部經 `0x452ee0` / `0x452f90` 呼叫 libjpeg core `0x452720`（**全檔唯二呼叫者 `0x452f53` / `0x453006`，皆在此之下**），讀檔頭/marker 後交自寫 EXIF 解析器。**每開一張 JPEG 無條件跑，與是否開啟 EXIF 面板無關**（BUG-3 即此處；面板只顯示已解析結果）。
+
+- EXIF 面板 = `ShowExifMainInfo` / `ShowExifSubInfo` / `ShowExifGpsInfo` 三個可切換顯示指令（相機 Make/Model/ExposureTime/FNumber/ISO + GPS），**預設關閉、須手動 toggle**。全檔無 `Orientation` 字串 → 不靠 EXIF 自動轉正 → 退場不影響顯示方向。
+- 改法：`0x456fc0` prologue 之後（`0x456fe8`，esi=arg 已載入）把 `cmp byte [esi+0x264],0`（`80 be 64 02 00 00 00`）→ `jmp 0x457015 ; nop ; nop`（`e9 28 00 00 00 90 90`）。`0x457015` 是函式自身「APP1 為空」的乾淨 epilogue（`xor al,al`；還原 `fs:[0]`；pop；`add esp,0x30`；ret）→ 立即回傳 al=0（視同無 EXIF），不碰 libjpeg/自寫 EXIF。回傳值在兩呼叫端皆被忽略（cdecl 2 引數，`add esp,8` 後 `mov al,1; jmp`）→ 單點涵蓋兩呼叫端。7 bytes、大小不變、可還原。
+- 回歸（沙箱）：
+  - 2a–2d（EXIF-ON）vs 2a–2e（EXIF-OFF）：19 EXIF fuzz（各獨立資料夾）+ 4 正常變體（有效 EXIF / 無 EXIF / 高品質 / 灰階）→ **兩版全部 ALIVE、尺寸 `[1024x1024x24]` 完全一致**（2e 零回歸）。
+  - 原版（無 patch）vs 2a–2e：原版對 11 個 OOB 樣本 CRASH `0xC000000D`，2a–2e 全 ALIVE。
+  - `--revert` 後與 `.orig` hash 相同、大小不變（2785280 bytes）。
+- 代價：EXIF 資訊面板顯示空白（使用者原本就未使用）。
+- 未測：投影片 / 縮圖模式下是否有別的 EXIF 消費者（guess：無，面板是唯一消費者）。
 
 ## GIF 退場（CONFIRMED，`tools/patch_hamana_gif.py`，已併入 `apply_patches.py` 第 2d 步）
 
@@ -109,6 +122,6 @@
 8. ~~D3DX~~ 不在攻擊面上：不載入使用者檔案（無 `D3DXCreateTextureFromFile*`）。
 9. ~~library 檔~~ 非自動可達：固定 `library\`、使用者自管。
 
-剩餘唯一在攻擊面上的 Hamana 自寫／內嵌 parser：**開 JPEG 時 `0x456fc0` 的 libjpeg 檔頭/marker 解析（jdmarker，1998）+ 自寫 EXIF 解析**。
-- 自寫 EXIF 已有 L0b 越界防護（BUG-3，CONFIRMED）；libjpeg jdmarker 本身僅做長度式 marker 略過，歷史 CVE 多在解壓（IDCT/upsample/color）而非 marker 讀取，風險較低、未另防護。
-- 要完全退場需讓 `0x456fc0` 不跑（3 個條件跳躍可改，類似 JPEG patch 作法）→ **代價：EXIF 資訊視窗失去內容**。屬「安全 vs 功能」取捨，待使用者決定是否採用（預設保留 EXIF 顯示，維持現狀 = 已 L0b 緩解）。
+10. ~~EXIF（libjpeg marker + 自寫 EXIF）~~ 已退場（見上「EXIF 退場」，`apply_patches.py` 第 2e 步）。對外 JPEG 路徑不再碰 libjpeg/自寫 EXIF；代價為 EXIF 面板空白（使用者未使用）。
+
+**攻擊面現況**：對外「不可信圖片／壓縮檔／資料夾」路徑上，Hamana 的 2006 自寫／內嵌解析器已全數退場或確認不可達——zip（L0→ax7z/7z.dll）、JPEG 像素（L2→GDI+）、GIF 內容解析（2d→死碼移除）、libjpeg+自寫 EXIF（2e→不執行）、PNG（無可達內建解碼器）、`.lnk`（shell32）、D3DX（不載入使用者檔案）、library（非自動可達）。剩餘解碼一律交給隨 Windows Update / 新版 SPI 更新的外部元件（GDI+、7z.dll 2024、ifwebp 2024）。ThumbDB 的 libjpeg（`0x4659e0`）只吃 Hamana 自寫的縮圖 DB，不在攻擊面上。

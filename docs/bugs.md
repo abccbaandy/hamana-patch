@@ -3,7 +3,8 @@
 - 修復方案分層（含通用解）：`docs/solutions.md` ← **先看這個**
 - 架構與測試工法：`docs/hamana-internals.md`
 - 工具：`tools/hamana_fix.py`（素材 diagnose / fix）、`tools/patch_ifwebp.py`（SPI 分派 patch）、
-  `tools/patch_hamana_exif.py`（EXIF 越界防護）、`tools/re/`（除錯 / 反組譯 / 迴歸測試，見 internals）
+  `tools/patch_hamana_exif.py`（EXIF 越界防護）、`tools/patch_hamana_exif_retire.py`（EXIF 解析完全退場）、
+  `tools/re/`（除錯 / 反組譯 / 迴歸測試，見 internals）
 
 本檔只記錄各 bug 的根因與重現證據；「該怎麼修」以 `solutions.md` 為準。
 
@@ -161,6 +162,11 @@ python tools/hamana_fix.py fix "<資料夾>"                    # 資料夾：�
 
 **首選**：`python tools/patch_hamana_exif.py "<Hamana>\Hamana.exe"`（已併入 `apply_patches.py`）。
 原理見 `solutions.md` L0b。素材端替代：`hamana_fix.py fix` 會移除壞 EXIF 區段（`EXIF_OOB`）。
+
+**更徹底（可選，`apply_patches.py` 第 2e 步）**：`tools/patch_hamana_exif_retire.py` 讓 `0x456fc0`
+整個 EXIF 擷取本體不執行 → libjpeg marker 解析 + 自寫 EXIF 解析在對外 JPEG 路徑**完全退場**
+（不再倚賴 L0b 攔截，因為根本不跑）。代價：EXIF 資訊面板（`ShowExif*Info`，預設關閉）顯示空白；
+Hamana 無 `Orientation` 使用，不影響顯示方向。詳見 `attack-surface.md`「EXIF 退場」。
 
 ---
 

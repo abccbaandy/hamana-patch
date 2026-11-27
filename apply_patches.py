@@ -9,6 +9,7 @@
   2c. Hamana.exe         jpg 改由 GDI+（ifgdip.spi）解碼，內建 libjpeg 1998 退場（3 bytes）
                          + DefaultSPIs/ifgdip.spiifgdip.ini 設 jpg=1（ifgdip 的 ini 路徑 bug，見工具 docstring）
   2d. Hamana.exe         停用內建 GIF 內容解析（動畫偵測，結果恆被丟棄），改由 GDI+ 靜態解碼（5 bytes）
+  2e. Hamana.exe         JPEG 開啟路徑的 libjpeg marker + 自寫 EXIF 解析退場（7 bytes；代價：EXIF 資訊面板空白）
   3. DefaultSPIs/ifwebp.spi  讓它同時宣告 *.jpg / *.jpeg，修正副檔名錯置的 WebP
   4. Hamana.ini          Respect_libjpeg=0（第 3 項的生效前提）
   5. ax7z.spi.ini        user_extensions 追加 cbz;cbr（第 1 項的配套）
@@ -38,6 +39,7 @@ import patch_hamana_exif as exif_patch        # noqa: E402
 import patch_hamana_nx as nx_patch            # noqa: E402
 import patch_hamana_jpeg as jpeg_patch        # noqa: E402
 import patch_hamana_gif as gif_patch          # noqa: E402
+import patch_hamana_exif_retire as exif_retire_patch  # noqa: E402
 import patch_ifwebp as webp_patch             # noqa: E402
 
 
@@ -108,6 +110,8 @@ def do_check(hamana_dir):
     jpeg_patch.do_check(exe)
     print('  GIF 解析：', end='')
     gif_patch.do_check(exe)
+    print('  EXIF 解析（libjpeg/自寫）：', end='')
+    exif_retire_patch.do_check(exe)
     print()
     print('[3/4] DefaultSPIs/ifwebp.spi')
     if spi:
@@ -155,6 +159,12 @@ def do_apply(hamana_dir, ax7z_ini):
     except SystemExit as e:
         print('  %s' % e)
     print()
+    print('[2e/5] libjpeg/自寫 EXIF 解析退場（EXIF 面板將顯示空白）')
+    try:
+        exif_retire_patch.do_patch(exe)
+    except SystemExit as e:
+        print('  %s' % e)
+    print()
     print('[3/5] 修正 WebP 副檔名分派')
     if spi:
         webp_patch.do_patch(spi)
@@ -180,6 +190,10 @@ def do_revert(hamana_dir):
     print('[1/3] Hamana.exe')
     if nx_patch.apply(exe, enable=False):
         print('  已關閉 DEP（NX_COMPAT）')
+    try:
+        exif_retire_patch.do_revert(exe)
+    except SystemExit as e:
+        print('  %s' % e)
     try:
         gif_patch.do_revert(exe)
     except SystemExit as e:

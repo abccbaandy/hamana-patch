@@ -2,9 +2,9 @@
 
 修正 [Hamana](https://www.vector.co.jp/soft/win95/art/se311115.html) v1.48（2006/06/19）三個會造成**閃退**與**讀圖失敗**的缺陷。
 
-另外做三項安全強化：開啟 DEP（資料執行防止）；讓 JPEG 改由系統 GDI+ 解碼、內建的 1998 年版 libjpeg 退場；停用內建的 GIF 內容解析（一段每開 GIF 都會跑、但結果永遠被丟棄的 2006 年自寫解析器），改由 GDI+ 靜態解碼。目的都是降低惡意圖檔利用舊解析器漏洞的風險。
+另外做四項安全強化：開啟 DEP（資料執行防止）；讓 JPEG 改由系統 GDI+ 解碼、內建的 1998 年版 libjpeg 退場；停用內建的 GIF 內容解析（一段每開 GIF 都會跑、但結果永遠被丟棄的 2006 年自寫解析器），改由 GDI+ 靜態解碼；讓開 JPEG 時殘留的 libjpeg 檔頭/marker 解析與自寫 EXIF 解析完全退場（代價：EXIF 資訊面板空白，該面板預設關閉）。目的都是降低惡意圖檔利用舊解析器漏洞的風險。
 
-補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 一項改動 94 bytes 程式碼；DEP 一項改 PE header 1 個 bit；JPEG 一項改 3 bytes 程式碼，另寫一個 ifgdip 設定檔；GIF 一項改 5 bytes 程式碼。
+補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 越界防護一項改動 94 bytes 程式碼；DEP 一項改 PE header 1 個 bit；JPEG 一項改 3 bytes 程式碼，另寫一個 ifgdip 設定檔；GIF 一項改 5 bytes 程式碼；EXIF 退場一項改 7 bytes 程式碼。
 
 > **本專案不包含 Hamana 本體**，請自備。這裡提供的是 patcher 與研究文件。
 
@@ -19,6 +19,7 @@ Bug-fix patches for Hamana v1.48 (2006), a Direct3D-based image viewer for Windo
 - **Hardening — DEP**: `Hamana.exe` lacks the `NX_COMPAT` flag, and Windows client editions default to the OptIn DEP policy, so Hamana runs without DEP. Its built-in parsers (libjpeg 1998, zlib 1.1.4, a hand-written EXIF parser) are statically linked and the exe has no ASLR. The patch sets `NX_COMPAT` (one bit). See `docs/attack-surface.md`.
 - **Hardening — JPEG via GDI+**: Hamana's decoder dispatch never hands `.jpg` to GDI+, so every JPEG ends up in the statically linked libjpeg 6b (1998). Three 1-byte jump patches route `.jpg` to `ifgdip.spi` (GDI+) instead; `ifwebp.spi` still picks up mislabelled WebP. `ifgdip.spi` ignores JPEG by default and its ini path is buggy (it reads `DefaultSPIs\ifgdip.spiifgdip.ini`), so the patcher writes `jpg=1` there. Side effect: CMYK JPEGs, which the built-in libjpeg rejects, now open.
 - **Hardening — GIF parser retired**: Before the SPI/GDI+ path, the dispatcher runs a hand-written "animated-GIF detector" (`0x456ca0`→`0x451cb0`) on every GIF, reading untrusted bytes with VS2005 checked iterators — the same machinery that crashes on bad EXIF (`0xC000000D`). Its result (is-this-animated) is always discarded: the display gate flag at `0x68e4dd` sits in `.data`, inits to 0 and is never written, so the animation path is dead code. A 5-byte patch replaces the lone `call` to the content parser with `xor eax,eax`, so GIFs skip straight to GDI+ static decoding; real video files (`.avi`/`.mpg`) are unaffected. Verified byte-identical decode output vs. the original across static/animated/truncated/corrupt GIFs, and a breakpoint confirms the parser no longer runs.
+- **Hardening — libjpeg/EXIF parse retired**: Even after pixels move to GDI+, the dispatcher still calls `0x456fc0` after each JPEG to extract EXIF, which reaches the 1998 libjpeg marker reader (`0x452720`, its only two callers both under this function) and the hand-written EXIF parser. This runs on *every* JPEG regardless of whether the EXIF info panel (`ShowExif*Info`, off by default) is shown. A 7-byte patch makes `0x456fc0` jump straight to its own clean epilogue (the "no EXIF" return path), so neither libjpeg nor the EXIF parser runs on the untrusted-JPEG path. Hamana has no `Orientation` handling, so display orientation is unaffected; only the (unused) EXIF panel goes blank. Verified zero regression (2a–2d vs 2a–2e: all samples ALIVE, identical dimensions) and byte-identical `--revert`.
 
 The zip and WebP patches only rewrite string constants; the EXIF patch changes 94 bytes of code (a 9-byte hook plus an 85-byte stub placed in existing `int3` padding). File sizes are unchanged and `--revert` restores the originals. **Hamana itself is not distributed here.**
 
@@ -141,7 +142,7 @@ Hamana 有五個可介入的接縫：
 | 真 JPEG / 真 WebP / rar / 7z / 資料夾 / 單張圖 | 正常 | 正常（無退化） |
 | DEP（`GetProcessMitigationPolicy`） | 關閉 | 開啟（permanent） |
 | 開啟 DEP 後：jpg / png / 透明 png / gif / bmp / webp / zip / cbz / 資料夾預讀 | 正常 | 正常（無退化） |
-| 誰解 JPEG 像素 | 內建 libjpeg（1998） | 系統 GDI+（libjpeg 只剩讀 EXIF 用的檔頭解析） |
+| 誰解 JPEG 像素 | 內建 libjpeg（1998） | 系統 GDI+（EXIF 退場後 libjpeg 在對外路徑完全不跑） |
 | JPEG：4:2:0 / 4:2:2 / 4:4:4 / 漸進式 / 灰階 / restart marker / 截斷檔 / 1x1 / 4001x3001 / `.jpeg` / `.JPG` / 壓縮檔內 | 正常 | 正常（無退化） |
 | **CMYK JPEG** | **讀取失敗** | **正常** |
 | BMP / PNG 內容 + `.jpg` 副檔名 | 讀取失敗 | 正常（GDI+ 依內容判斷） |

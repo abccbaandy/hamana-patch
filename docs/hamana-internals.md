@@ -32,7 +32,7 @@ ini 載入（`0x4080e2` 起）→ 全域旗標：`Respect_libjpeg`→`[0x67bfc8]
 4. 一般 SPI 迴圈（清單 `0x68eb5c`，每筆 0x80 bytes；`[+2]!=0` 的略過）
 5. `!Respect_libjpeg && isJpeg` → 內建 libjpeg
 6. 第 3 步沒試過且 `gdipExt` → `ifgdip.spi`
-- 成功後 `isJpeg` 時呼叫 `0x456fc0`（guess：EXIF 讀取）。
+- 成功後 `isJpeg` 時呼叫 `0x456fc0`（CONFIRMED：EXIF 擷取，經 `0x452ee0`/`0x452f90`→libjpeg `0x452720` 讀 marker + 自寫 EXIF 解析；已由 `patch_hamana_exif_retire.py` 退場，見 `attack-surface.md`「EXIF 退場」）。
 - `gdipExt` 的 map `0x68ec04` = ifgdip 物件（`0x68eb90`，載入時以匯出 `IsIfGDIP` 辨識，`0x464252`）宣告的副檔名集合；內建 libjpeg 以虛擬 SPI 項目註冊（`0x46453f`）。
 - 推論：**jpg/jpeg 永遠不會交給 GDI+**（BMP 改名 `.jpg` 在所有設定都讀不出；改名 `.png` 則讀得出）；**exe 內沒有可達的 PNG 解碼器**，`Respect_internalPNGDec` 實際只決定 PNG 是否先問 GDI+。
 - PNG 相關字串兩組皆在靜態連結的 D3DX 區（libpng `1.0.5` 與 PNG writer），無 code xref、無 libpng 錯誤字串 → 孤兒資料（guess）；開 PNG 時 zlib inflate（`0x4d6110`/`0x4d6760`）在任何設定都不命中（CONFIRMED，正控制組 = 原版開 zip 會命中）。
