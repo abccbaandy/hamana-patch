@@ -2,9 +2,9 @@
 
 修正 [Hamana](https://www.vector.co.jp/soft/win95/art/se311115.html) v1.48（2006/06/19）三個會造成**閃退**與**讀圖失敗**的缺陷。
 
-另外做兩項安全強化：開啟 DEP（資料執行防止），並讓 JPEG 改由系統 GDI+ 解碼、內建的 1998 年版 libjpeg 退場，降低惡意圖檔利用舊解析器漏洞的風險。
+另外做三項安全強化：開啟 DEP（資料執行防止）；讓 JPEG 改由系統 GDI+ 解碼、內建的 1998 年版 libjpeg 退場；停用內建的 GIF 內容解析（一段每開 GIF 都會跑、但結果永遠被丟棄的 2006 年自寫解析器），改由 GDI+ 靜態解碼。目的都是降低惡意圖檔利用舊解析器漏洞的風險。
 
-補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 一項改動 94 bytes 程式碼；DEP 一項改 PE header 1 個 bit；JPEG 一項改 3 bytes 程式碼，另寫一個 ifgdip 設定檔。
+補丁檔案大小不變，可完整還原。zip 與 WebP 兩項只改字串常數；EXIF 一項改動 94 bytes 程式碼；DEP 一項改 PE header 1 個 bit；JPEG 一項改 3 bytes 程式碼，另寫一個 ifgdip 設定檔；GIF 一項改 5 bytes 程式碼。
 
 > **本專案不包含 Hamana 本體**，請自備。這裡提供的是 patcher 與研究文件。
 
@@ -18,6 +18,7 @@ Bug-fix patches for Hamana v1.48 (2006), a Direct3D-based image viewer for Windo
 - **Images failing to load**: Hamana dispatches decoders by *file extension*, never by content. WebP files named `.jpg` are handed to libjpeg and fail. The patch makes `ifwebp.spi` also claim `*.jpg`, relying on Hamana's automatic fallback when a Susie plugin reports the format as unsupported.
 - **Hardening — DEP**: `Hamana.exe` lacks the `NX_COMPAT` flag, and Windows client editions default to the OptIn DEP policy, so Hamana runs without DEP. Its built-in parsers (libjpeg 1998, zlib 1.1.4, a hand-written EXIF parser) are statically linked and the exe has no ASLR. The patch sets `NX_COMPAT` (one bit). See `docs/attack-surface.md`.
 - **Hardening — JPEG via GDI+**: Hamana's decoder dispatch never hands `.jpg` to GDI+, so every JPEG ends up in the statically linked libjpeg 6b (1998). Three 1-byte jump patches route `.jpg` to `ifgdip.spi` (GDI+) instead; `ifwebp.spi` still picks up mislabelled WebP. `ifgdip.spi` ignores JPEG by default and its ini path is buggy (it reads `DefaultSPIs\ifgdip.spiifgdip.ini`), so the patcher writes `jpg=1` there. Side effect: CMYK JPEGs, which the built-in libjpeg rejects, now open.
+- **Hardening — GIF parser retired**: Before the SPI/GDI+ path, the dispatcher runs a hand-written "animated-GIF detector" (`0x456ca0`→`0x451cb0`) on every GIF, reading untrusted bytes with VS2005 checked iterators — the same machinery that crashes on bad EXIF (`0xC000000D`). Its result (is-this-animated) is always discarded: the display gate flag at `0x68e4dd` sits in `.data`, inits to 0 and is never written, so the animation path is dead code. A 5-byte patch replaces the lone `call` to the content parser with `xor eax,eax`, so GIFs skip straight to GDI+ static decoding; real video files (`.avi`/`.mpg`) are unaffected. Verified byte-identical decode output vs. the original across static/animated/truncated/corrupt GIFs, and a breakpoint confirms the parser no longer runs.
 
 The zip and WebP patches only rewrite string constants; the EXIF patch changes 94 bytes of code (a 9-byte hook plus an 85-byte stub placed in existing `int3` padding). File sizes are unchanged and `--revert` restores the originals. **Hamana itself is not distributed here.**
 
@@ -106,6 +107,7 @@ python apply_patches.py "C:\path\to\Hamana" --revert
 | `Hamana.exe` | hook CRT `_invalid_parameter`（9 bytes）+ stub（85 bytes，放在既有 `int3` 填充區） | EXIF 越界時只放棄該段 EXIF，圖照常顯示 |
 | `Hamana.exe` | PE header `DllCharacteristics` 加上 `NX_COMPAT`（1 bit） | 行程啟用 DEP（原版在 Windows 預設 OptIn 政策下沒有 DEP） |
 | `Hamana.exe` | 解碼分派函式的 3 個條件跳躍改成無條件（3 bytes） | `.jpg` 改由 GDI+ 解碼，內建 libjpeg 不再解像素 |
+| `Hamana.exe` | 動畫 GIF 偵測器對內容解析器的呼叫改成 `xor eax,eax`（5 bytes） | 內建 GIF 內容解析退場（結果本就被丟棄），GIF 改由 GDI+ 靜態解碼 |
 | `DefaultSPIs/ifgdip.spiifgdip.ini` | 新增 `[ifgdip] jpg=1` | 讓 `ifgdip.spi` 接受 jpg（檔名怪是因為 ifgdip 組路徑的 bug，見下） |
 | `DefaultSPIs/ifwebp.spi` | 宣告 `*.webp` → `*.webp;*.jpg;*.jpeg` | 接手副檔名錯置的 WebP |
 | `Hamana.ini` | `Respect_libjpeg=0` | 上一項的生效前提 |
@@ -113,12 +115,13 @@ python apply_patches.py "C:\path\to\Hamana" --revert
 
 ### 為什麼有效
 
-Hamana 有四個可介入的接縫：
+Hamana 有五個可介入的接縫：
 
 1. **找不到內建 handler 時，會把檔案交給 Susie SPI。** 內建壓縮格式是用字串常數 `"zip"` / `"cbz"` 認定的，改掉它們就等於停用內建解壓。
 2. **SPI 的 `IsSupported` 回報不支援時，Hamana 會自動回退**到下一個解碼器。因此 SPI 可以安全地「多宣告」副檔名——補丁後 `.jpg` 先交給 GDI+，GDI+ 讀不了的（例如內容其實是 WebP）再交給 `ifwebp.spi`。
 3. **解碼分派順序寫死在一個函式裡**（`0x45a780`）：原版的 jpg 會被排除在 GDI+ 之外，最後一定進內建 libjpeg。改掉 3 個條件跳躍就能把 jpg 導向 GDI+。`ifgdip.spi` 預設不收 jpg，而它讀設定時忘了去掉自己的檔名，實際讀的是 `DefaultSPIs\ifgdip.spiifgdip.ini`，所以設定得寫在這個怪檔名裡。
 4. **EXIF 解析器的三個函式都有標準 C++ EH frame。** 越界時 CRT 會先呼叫 `_invalid_parameter`；在這裡依最內層 SEH 框架判斷「是不是 EXIF 解析中」，是的話就把堆疊還原到該函式的正常出口。非 EXIF 路徑完全照舊。
+5. **動畫 GIF 偵測器的結果被一個恆為 0 的旗標丟棄。** 分派函式對每張 GIF 都先跑一段自寫的內容解析（偵測是否多幀），但決定是否採用的旗標 `0x68e4dd` 在 `.data` 恆為 0、動畫顯示路徑是死碼。把那段解析唯一的呼叫改成 `xor eax,eax`，GIF 就直接走 GDI+ 靜態解碼；真正的影片（`.avi`/`.mpg`）不走這條分支，不受影響。
 
 詳細原理、重現方式與實測資料見 [`docs/`](docs/)。
 

@@ -26,7 +26,7 @@
 ini 載入（`0x4080e2` 起）→ 全域旗標：`Respect_libjpeg`→`[0x67bfc8]`、`Respect_internalPNGDec`→`[0x67bfc9]`、`Respect_Gdiplus`→`[0x67bfca]`、`Respect_Ghostscript`→`[0x67bfcb]`。
 
 開圖分派函式 `0x45a780`（CONFIRMED，反組譯 + 沙箱矩陣）。`isJpeg` = `0x455b10`（比對 `jpg`/`jpeg`），`gdipExt` = 副檔名在 map `0x68ec04` 且非 jpeg：
-1. `gif` 特殊路徑（`0x456ca0`、`[0x68e4dd]`，guess：動畫 GIF）
+1. 動畫 GIF 偵測特殊路徑（`0x456ca0`）：對 `[Movie] Extensions` 內副檔名呼叫；真影片直接回 true，gif/cbz/zip 才呼叫 `0x451cb0` 讀內容列舉 block 數多幀。顯示閘門 `[0x68e4dd]`（`0x45a8a4`）**在 .data 恆 0**（零寫入）→ 結果永遠被丟棄、動畫顯示路徑 `0x45a8ad`+ 是死碼。已 patch 退場（`patch_hamana_gif.py`：`0x456d6c` 的 `call 0x451cb0` → `xor eax,eax`；見 `attack-surface.md`「GIF 退場」）
 2. `Respect_libjpeg && isJpeg` → 內建 libjpeg `0x45a450`
 3. `(Respect_internalPNGDec && ext==png) || Respect_Gdiplus` → 若 `gdipExt`：`ifgdip.spi`（物件 `0x68eb94`，經 `0x463630`）
 4. 一般 SPI 迴圈（清單 `0x68eb5c`，每筆 0x80 bytes；`[+2]!=0` 的略過）

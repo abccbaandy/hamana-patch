@@ -31,7 +31,7 @@
 | EXIF | 自寫，3 個函式 | `bugs.md` BUG-3 | 無；`ShowExif*Info` 只管顯示 | 每張 JPEG 都會解析 | 中（已知會越界讀取，已由 L0b 攔截） |
 | PNG | **無可達的內建解碼器**（CONFIRMED） | 兩組 PNG 字串都是 D3DX 孤兒資料（libpng 1.0.5 reader / writer，無 xref）；開 PNG 時 inflate 不命中；移除 `ifgdip.spi` 後任何設定都讀不出 PNG | `Respect_internalPNGDec` 只決定是否先問 GDI+ | 1 | 無（PNG 一律 GDI+）；不必改設定 |
 | zip / cbz | minizip 0.15 + zlib 1.1.4 | `hamana-internals.md` | L0 patch | 已退場 | 已消除 |
-| GIF | unknown；分派函式第一步的特殊路徑（`0x456ca0`），guess：動畫 GIF | 副檔名表 `gif`（offset 2236736） | unknown | — | unknown |
+| GIF | 自寫「動畫 GIF 偵測器」（`0x456ca0`→`0x451cb0`→`0x451a10`/`0x451610`，VS2005 checked-iterator 讀檔頭+列舉 block）。**非像素解碼器**，像素一律 GDI+ | 無（`[Movie] Extensions` 含 `.gif` 時觸發；顯示閘門 `[0x68e4dd]` 恆 0） | 已 patch 退場（`tools/patch_hamana_gif.py`） | — | 原版中（每開 GIF 都解析不可信內容，與 EXIF 同 `0xC000000D` 機制）。退場後無（見下「GIF 退場」） |
 | D3DX | 靜態連結（shader 編譯器、HDR writer 字串） | PNG 字串為孤兒資料（見 PNG 列）；是否用 D3DX 載入使用者檔案：unknown（guess：只載 `BaseTextures/`） | — | — | 低，unknown |
 | `.lnk`、library 檔 | 自寫 | `Hamana.txt:253` | — | — | 低到中，unknown |
 
@@ -76,10 +76,20 @@
 - 回歸（沙箱，原版 vs patch）：4:2:0/4:2:2/4:4:4、漸進式、灰階、restart marker、截斷、1x1、4001x3001、`.jpeg`、`.JPG`、7z 內 jpg、WebP 改名 `.jpg`、EXIF fuzz 19 種（逐檔 + 同資料夾預讀）、PNG 8 種、壓縮檔 8 種 → 全部 ALIVE、尺寸一致。CMYK JPEG：原版讀不出，patch 後正常；BMP/PNG 改名 `.jpg` 也變得讀得出。`apply_patches --revert` 後 exe/ifwebp 與原檔 hash 相同。
 - 未測：GDI+ 對大量圖的解碼速度；EXIF 資訊視窗、投影片、縮圖模式。
 
+## GIF 退場（CONFIRMED，`tools/patch_hamana_gif.py`，已併入 `apply_patches.py` 第 2d 步）
+
+- 攻擊面：分派函式 `0x45a780` 在 jpg/SPI 之前，對 `[Movie] Extensions` 內的副檔名呼叫 `0x456ca0`。該函式對**真正的影片**（.avi/.mpg…，非 gif/cbz/zip）直接回傳 true（走影片路徑，不讀內容）；只有 gif/cbz/zip 才呼叫 `0x451cb0`：比對 `GIF`/`89a` magic、讀 13-byte 螢幕描述元（`0x451610`）、逐一列舉 block（`0x451a10`，`0x21`/`0x2c`/`0x3b`，數影像 block 判斷多幀）。全是自寫、VS2005 checked-iterator 讀不可信內容，損壞 GIF 越界時與 EXIF（BUG-3）同機制觸發 `_invalid_parameter`→`0xC000000D`（對應 `Hamana.txt`「不正なGIFファイルのあるフォルダに移動するとエラー」）。
+- **關鍵（CONFIRMED）**：動畫顯示閘門 `[0x68e4dd]` 在 `.data`、初值 0、全檔零寫入（只有 `0x456ee4`、`0x45a8a6` 兩處讀取）→ 執行期恆 0 → `0x45a8a4` 的 `cmp [0x68e4dd],0; je 一般路徑` 永遠成立 → `0x456ca0` 回傳的「是否動畫」結果**每次都被丟棄**，動畫顯示路徑（`0x45a8ad`+）是死碼。亦即這段內容解析每開一張 GIF 都跑，卻毫無用途。
+- 改法：`0x451cb0` 的唯一呼叫者是 `0x456d6c`（在 `0x456ca0` 內），把 `call 0x451cb0`（`e8 3f af ff ff`，file offset `0x56d6c`）→ `xor eax,eax; nop×3`（`31 c0 90 90 90`）。引數由其後既有 `add esp,4` 清掉，al=0 → 視為非動畫 → 走一般路徑 → GDI+/ifgdip.spi 靜態解碼。`0x451cb0`/`0x451a10`/`0x451610` 成死碼。5 bytes、大小不變、可還原。
+- 回歸（沙箱，原版 vs patch）：靜態/g87/多幀動畫/截斷×2/竄改 block 長度×2（各獨立資料夾）→ 全部 ALIVE、標題 `[WxHxbpp]` 完全一致（靜態 8bpp、動畫 32bpp），兩版皆不 crash。minidbg `--bp 0x451cb0`：原版開 anim.gif 命中（返回位址 `0x456d71`，呼叫鏈 `0x456e06`→`0x4103d0`），patch 版 6s 全程未命中 → 證明移除的是真實執行路徑，非死碼。
+- 影響：靜態 GIF 不變（本就 GDI+ 解像素）；影片不受影響（`0x456ca0` 對它們不走此分支）；動畫 GIF 播放偵測退場——但其顯示路徑本就被 `[0x68e4dd]`≡0 關死，使用者端無可見差異。
+- 未測：GDI+ 對 GIF 的速度；大量 GIF 資料夾預讀。
+
 ## 建議順序
 
 1. ~~DEP~~ 已完成。
 2. ~~PNG~~ 不需處理：沒有內建 PNG 解碼器可達。
 3. ~~Formats/Codecs~~ 從未載入，不在攻擊面上。
 4. ~~DLL 搜尋路徑~~ 開檔不會被劫持。
-5. ~~JPEG~~ 已退場（見上）。剩：EXIF 讀取時的 libjpeg 檔頭解析 + 自寫 EXIF 解析；GIF 特殊路徑（unknown）。
+5. ~~JPEG~~ 已退場（見上）。
+6. ~~GIF~~ 已退場（見上）。剩：EXIF 讀取時的 libjpeg 檔頭解析 + 自寫 EXIF 解析（已有 L0b 越界防護）。
