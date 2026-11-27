@@ -32,8 +32,9 @@
 | PNG | **無可達的內建解碼器**（CONFIRMED） | 兩組 PNG 字串都是 D3DX 孤兒資料（libpng 1.0.5 reader / writer，無 xref）；開 PNG 時 inflate 不命中；移除 `ifgdip.spi` 後任何設定都讀不出 PNG | `Respect_internalPNGDec` 只決定是否先問 GDI+ | 1 | 無（PNG 一律 GDI+）；不必改設定 |
 | zip / cbz | minizip 0.15 + zlib 1.1.4 | `hamana-internals.md` | L0 patch | 已退場 | 已消除 |
 | GIF | 自寫「動畫 GIF 偵測器」（`0x456ca0`→`0x451cb0`→`0x451a10`/`0x451610`，VS2005 checked-iterator 讀檔頭+列舉 block）。**非像素解碼器**，像素一律 GDI+ | 無（`[Movie] Extensions` 含 `.gif` 時觸發；顯示閘門 `[0x68e4dd]` 恆 0） | 已 patch 退場（`tools/patch_hamana_gif.py`） | — | 原版中（每開 GIF 都解析不可信內容，與 EXIF 同 `0xC000000D` 機制）。退場後無（見下「GIF 退場」） |
-| D3DX | 靜態連結（shader 編譯器、HDR writer 字串） | PNG 字串為孤兒資料（見 PNG 列）；是否用 D3DX 載入使用者檔案：unknown（guess：只載 `BaseTextures/`） | — | — | 低，unknown |
-| `.lnk`、library 檔 | 自寫 | `Hamana.txt:253` | — | — | 低到中，unknown |
+| D3DX | 靜態連結（shader 編譯器、HDR writer 字串） | **不載入使用者檔案（CONFIRMED）**：全檔無 `D3DXCreateTextureFromFile*` 字串，紋理來源字串只有 `BaseTextures`（安裝目錄自帶素材）；PNG 字串為孤兒資料（見 PNG 列） | — | — | 無（不經使用者檔案） |
+| `.lnk` | **shell32（非自寫，CONFIRMED）** | `0x4962ef` `CoCreateInstance(CLSID_ShellLink, IID_IShellLinkW)` → QI `IPersistFile`（`0x496311`）→ `Load`（vtable `[+0x14]`，`0x4964bc`）→ `GetPath`（`[+0xc]`，`0x496551`）。無 `Resolve`（不觸發網路/UI）、路徑上無 `ShellExecute` | — | — | **無**：二進位解析交給 Windows shell32（隨 Update 更新）；瀏覽資料夾自動解析每個 .lnk 但只把 target 加進清單、**不執行**（實測，見下「.lnk 退場確認」） |
+| library 檔 | 自寫 | `Hamana.txt:253`；`library\` 字串 xref `0x40aba0` | — | — | 低（**非自動可達**）：library 目錄固定為安裝目錄 `library\`（`0x40aba0` 把 `library\` 接到設定 base dir），使用者自管並顯式開啟；瀏覽不可信資料夾/壓縮檔不會自動解析 library 檔 |
 
 ## 外部解析器（經 SPI 或系統 DLL）
 
@@ -85,6 +86,17 @@
 - 影響：靜態 GIF 不變（本就 GDI+ 解像素）；影片不受影響（`0x456ca0` 對它們不走此分支）；動畫 GIF 播放偵測退場——但其顯示路徑本就被 `[0x68e4dd]`≡0 關死，使用者端無可見差異。
 - 未測：GDI+ 對 GIF 的速度；大量 GIF 資料夾預讀。
 
+## .lnk 退場確認（CONFIRMED，純實測 + 反組譯，無 patch）
+
+`.lnk` 不是 Hamana 自寫 parser，不必 patch。證據：
+
+- 反組譯（`0x496290`–`0x496660`）：對副檔名 `lnk` 的檔案走 `CoCreateInstance(ShellLink)` → `IPersistFile::Load(<lnk 路徑>)` → `IShellLinkW::GetPath`，二進位 `.lnk` 解析 100% 由 `shell32.dll` 完成（隨 Windows Update 更新）。不呼叫 `Resolve`（無 `SLR_*` → 不連網、不跳 UI），解析路徑上無 `ShellExecuteW`（其 5 個 call-site `0x40170d`/`0x40175d`/`0x405489`/`0x436392`/`0x4363a9` 為使用者主動「外部開啟」指令，非瀏覽觸發）。
+- 沙箱實測（原版 vs patch，`hidden_run.py`，每樣本獨立資料夾）：
+  - 正常 `.lnk`（指向圖）→ ALIVE，target 作為第 2 張加入清單（`(1/2)`）
+  - 指向 `calc.exe` 的 `.lnk` → ALIVE，**不加入可視清單**（`(1/1)`）
+  - **指向 `.bat` 的 `.lnk`，直接開啟它** → ALIVE，sentinel marker 檔**從未生成** → **不自動執行 target**（CONFIRMED）
+  - 截斷/垃圾 `.lnk`（magic 正確但本體截斷、magic 全錯）→ 皆 ALIVE、不崩（shell32 robust）
+
 ## 建議順序
 
 1. ~~DEP~~ 已完成。
@@ -92,4 +104,11 @@
 3. ~~Formats/Codecs~~ 從未載入，不在攻擊面上。
 4. ~~DLL 搜尋路徑~~ 開檔不會被劫持。
 5. ~~JPEG~~ 已退場（見上）。
-6. ~~GIF~~ 已退場（見上）。剩：EXIF 讀取時的 libjpeg 檔頭解析 + 自寫 EXIF 解析（已有 L0b 越界防護）。
+6. ~~GIF~~ 已退場（見上）。
+7. ~~`.lnk`~~ 不在攻擊面上：shell32 解析、不自動執行（見上「.lnk 退場確認」）。
+8. ~~D3DX~~ 不在攻擊面上：不載入使用者檔案（無 `D3DXCreateTextureFromFile*`）。
+9. ~~library 檔~~ 非自動可達：固定 `library\`、使用者自管。
+
+剩餘唯一在攻擊面上的 Hamana 自寫／內嵌 parser：**開 JPEG 時 `0x456fc0` 的 libjpeg 檔頭/marker 解析（jdmarker，1998）+ 自寫 EXIF 解析**。
+- 自寫 EXIF 已有 L0b 越界防護（BUG-3，CONFIRMED）；libjpeg jdmarker 本身僅做長度式 marker 略過，歷史 CVE 多在解壓（IDCT/upsample/color）而非 marker 讀取，風險較低、未另防護。
+- 要完全退場需讓 `0x456fc0` 不跑（3 個條件跳躍可改，類似 JPEG patch 作法）→ **代價：EXIF 資訊視窗失去內容**。屬「安全 vs 功能」取捨，待使用者決定是否採用（預設保留 EXIF 顯示，維持現狀 = 已 L0b 緩解）。
